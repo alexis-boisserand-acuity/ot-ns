@@ -1,0 +1,13 @@
+# Copyright (c) 2026
+# SPDX-License-Identifier: Apache-2.0
+
+description: |
+  OpenThread Network Simulator (OTNS) virtual IEEE 802.15.4 radio.
+
+  This node represents a simulated 2.4 GHz O-QPSK radio that is connected to a
+  running OTNS instance through a Unix domain socket. It is only functional on
+  the native_sim board.
+
+compatible: "zephyr,ieee802154-otns"
+
+include: base.yaml

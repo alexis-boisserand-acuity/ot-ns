@@ -1,0 +1,162 @@
+/*
+ * Copyright (c) 2026
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Shared definitions for the OTNS (OpenThread Network Simulator) IEEE 802.15.4
+ * driver. This header is included by BOTH:
+ *
+ *   - the embedded (Zephyr CPU) side  : ieee802154_otns.c
+ *   - the runner  (host/native) side  : ieee802154_otns_bottom.c
+ *
+ * It must therefore only use standard C integer types and no Zephyr- or
+ * host-specific headers, so that it is valid in both compilation environments.
+ *
+ * The two sides are linked together into a single native_simulator executable
+ * and communicate through the plain C functions declared below. Data flowing
+ * from the runner side towards the embedded side is signalled with a dedicated
+ * interrupt (IEEE802154_OTNS_IRQ) and pulled by the embedded ISR.
+ */
+
+#ifndef IEEE802154_OTNS_PRIV_H__
+#define IEEE802154_OTNS_PRIV_H__
+
+#include <stdint.h>
+#include <stdbool.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/*
+ * OTNS simulation-event types (subset used by this driver).
+ * Must match ot-rfsim/src/event-sim.h.
+ */
+#define OTNS_EVENT_ALARM_FIRED       0
+#define OTNS_EVENT_UART_WRITE        2
+#define OTNS_EVENT_STATUS_PUSH       5
+#define OTNS_EVENT_RADIO_COMM_START  6
+#define OTNS_EVENT_RADIO_TX_DONE     7
+#define OTNS_EVENT_RADIO_CHAN_SAMPLE 8
+#define OTNS_EVENT_RADIO_STATE       9
+#define OTNS_EVENT_RADIO_RX_DONE     10
+#define OTNS_EVENT_EXT_ADDR          11
+#define OTNS_EVENT_NODE_INFO         12
+
+/* OTNS otError values used on the wire (subset of otError). */
+#define OTNS_ERROR_NONE                   0
+#define OTNS_ERROR_CHANNEL_ACCESS_FAILURE 15
+#define OTNS_ERROR_ABORT                  11
+
+/* OTNS radio (OT) energy/state values, see otRadioState. */
+#define OTNS_RADIO_STATE_DISABLED 0
+#define OTNS_RADIO_STATE_SLEEP    1
+#define OTNS_RADIO_STATE_RECEIVE  2
+#define OTNS_RADIO_STATE_TRANSMIT 3
+
+/* Maximum IEEE 802.15.4 PHY payload (PSDU) size including the 2-byte FCS. */
+#define OTNS_PSDU_MAX 127
+
+/* Invalid RSSI marker (matches OT_RADIO_RSSI_INVALID = 127). */
+#define OTNS_RSSI_INVALID 127
+
+/*
+ * Interrupt line used by the runner side to notify the embedded side that a
+ * radio event is ready to be consumed. native_sim reserves IRQs 0..3
+ * (timer/offload/counter/nsos), so line 4 is free.
+ */
+#define IEEE802154_OTNS_IRQ 4
+
+/*
+ * A radio event exchanged across the embedded/runner boundary. The PSDU here is
+ * the raw MAC frame *including* the 2-byte FCS, without any PHY length prefix
+ * and without the OTNS channel byte (both handled inside the runner side).
+ */
+struct otns_radio_event {
+	uint8_t  type;          /* OTNS_EVENT_* */
+	uint8_t  channel;       /* IEEE 802.15.4 channel (11..26) */
+	int8_t   power;         /* dBm: RSSI for RX, TX power / CCA energy otherwise */
+	uint8_t  error;         /* OTNS_ERROR_* result reported by the simulator */
+	uint16_t psdu_len;      /* length of psdu[] (incl. FCS); 0 if none */
+	uint8_t  psdu[OTNS_PSDU_MAX];
+};
+
+/*
+ * ---------------------------------------------------------------------------
+ * Runner-side functions, called from the embedded side.
+ * ---------------------------------------------------------------------------
+ */
+
+/* Returns the OTNS node id assigned to this process (>=1), or 0 if unknown. */
+int nsi_otns_bottom_get_node_id(void);
+
+/* Returns true once the driver is connected to OTNS, false otherwise. */
+bool nsi_otns_bottom_is_connected(void);
+
+/* Returns true if an OTNS socket path was configured on the command line. */
+bool nsi_otns_bottom_is_configured(void);
+
+/*
+ * Queue a frame transmission towards the simulator (RADIO_COMM_START). The
+ * frame is the MAC PSDU including FCS. Returns 0 on success, negative on error.
+ */
+int nsi_otns_bottom_tx(uint8_t channel, int8_t power,
+		       const uint8_t *psdu, uint16_t len);
+
+/*
+ * Like nsi_otns_bottom_tx(), but defer the transmission by @p delay_us of
+ * virtual time, timed on the runner's microsecond-resolution HW clock. Used for
+ * the auto-ACK, which must be sent exactly one AIFS turnaround (192 us) after
+ * the acknowledged frame ends - an interval too short for the Zephyr kernel
+ * tick to represent. Only one deferred frame may be pending at a time; a new
+ * call replaces any still-pending one. Returns 0 on success, negative on error.
+ */
+int nsi_otns_bottom_tx_after(uint8_t channel, int8_t power,
+			     const uint8_t *psdu, uint16_t len,
+			     uint32_t delay_us);
+
+/*
+ * Request a channel sample / CCA from the simulator (RADIO_CHAN_SAMPLE).
+ * The energy result is delivered back asynchronously as a radio event.
+ */
+int nsi_otns_bottom_cca(uint8_t channel);
+
+/* Report the current radio energy state to the simulator (RADIO_STATE). */
+void nsi_otns_bottom_set_state(uint8_t state, uint8_t channel);
+
+/*
+ * Send CLI/UART reply bytes back to the simulator as an OT_SIM_EVENT_UART_WRITE
+ * event. Used by the OTNS CLI bridge.
+ */
+void nsi_otns_bottom_send_uart(const uint8_t *buf, uint16_t len);
+
+/*
+ * Report this node's IEEE 802.15.4 extended (MAC) address to the simulator as
+ * an OT_SIM_EVENT_EXT_ADDR event. OTNS uses this to route unicast frames that
+ * are addressed by extended address to the correct node; without it, such
+ * frames (e.g. the MLE Parent Response) are never delivered and the link fails
+ * with repeated NoAck errors. @p ext_addr_be must hold the 8 address bytes in
+ * big-endian order (OTNS keys its node lookup on the big-endian value), i.e.
+ * the reverse of the little-endian order they appear in on air.
+ */
+void nsi_otns_bottom_send_ext_addr(const uint8_t *ext_addr_be);
+
+/*
+ * Forward an OpenThread OTNS status string to the simulator as an
+ * OT_SIM_EVENT_OTNS_STATUS_PUSH event. OTNS uses these to visualise node state
+ * in its web UI (e.g. "role=2;rloc16=..."). Without them a node stays greyed
+ * out ("disabled") even though it has actually attached. @p status is a raw,
+ * non-NUL-terminated status string of @p len bytes.
+ */
+void nsi_otns_bottom_send_status(const char *status, uint16_t len);
+
+/*
+ * Fetch the radio event that the runner side has just delivered (pulled by the
+ * embedded ISR). Returns true and fills *ev if an event was pending, false otherwise.
+ */
+bool nsi_otns_bottom_get_event(struct otns_radio_event *ev);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* IEEE802154_OTNS_PRIV_H__ */
