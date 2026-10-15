@@ -39,6 +39,8 @@ extern "C" {
 #endif
 
 #define IEEE802154_OTNS_IRQ 4
+#define IEEE802154_OTNS_ALARM_MILLI_IRQ 6
+#define IEEE802154_OTNS_ALARM_MICRO_IRQ 7
 
 struct otns_radio_event
 {
@@ -80,6 +82,16 @@ bool nsi_otns_bottom_get_event(struct otns_radio_event *ev);
 int32_t nsi_otns_bottom_get_drift_offset_ms(void);
 
 uint8_t nsi_otns_bottom_get_csl_accuracy(void);
+
+uint64_t nsi_otns_bottom_get_time_us(void);
+
+void nsi_otns_bottom_alarm_set_milli_at(uint64_t at_us);
+
+void nsi_otns_bottom_alarm_cancel_milli(void);
+
+void nsi_otns_bottom_alarm_set_micro_at(uint64_t at_us);
+
+void nsi_otns_bottom_alarm_cancel_micro(void);
 
 #ifdef __cplusplus
 }

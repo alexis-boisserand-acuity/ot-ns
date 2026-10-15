@@ -121,18 +121,28 @@ static int energy_scan(const struct device *dev, uint16_t duration, energy_scan_
     return 0;
 }
 
+static void radio_wake(void)
+{
+    if (data.started)
+    {
+        return;
+    }
+
+    data.started       = true;
+    data.sleep_pending = false;
+    nsi_otns_bottom_set_state(OT_RADIO_STATE_RECEIVE, data.channel);
+}
+
 static int cca(const struct device *dev)
 {
     ARG_UNUSED(dev);
 
-    if (!data.started)
-    {
-        return -EIO;
-    }
     if (!nsi_otns_bottom_is_connected())
     {
         return -EIO;
     }
+
+    radio_wake();
 
     k_sem_reset(&data.cca_wait);
     data.cca_channel_free = true;
@@ -264,10 +274,12 @@ static int tx_check_preconditions(enum ieee802154_tx_mode mode, uint16_t len)
         return -ENOTSUP;
     }
 
-    if (!data.started || !nsi_otns_bottom_is_connected())
+    if (!nsi_otns_bottom_is_connected())
     {
         return -EIO;
     }
+
+    radio_wake();
 
     if (len + FCS_SIZE > OT_RADIO_FRAME_MAX_SIZE)
     {
@@ -403,9 +415,7 @@ static int start(const struct device *dev)
         return -EALREADY;
     }
 
-    data.started       = true;
-    data.sleep_pending = false;
-    nsi_otns_bottom_set_state(OT_RADIO_STATE_RECEIVE, data.channel);
+    radio_wake();
 
     return 0;
 }
