@@ -139,6 +139,14 @@ uint16_t crc16(const uint8_t *data, size_t len);
 bool parse_frame(const uint8_t *psdu, uint16_t len, struct frame_addr_info *info);
 bool frame_is_for_me(const uint8_t *psdu, uint16_t len, struct frame_addr_info *info);
 
+bool frame_addr_matches(const uint8_t          *psdu,
+                        uint16_t                len,
+                        struct frame_addr_info *info,
+                        const uint8_t          *own_short_addr,
+                        const uint8_t          *own_ext_addr);
+bool frame_is_ack(const uint8_t *psdu, uint16_t len);
+bool frame_is_ack_requested(const uint8_t *psdu, uint16_t len);
+
 bool frame_pending_for(const uint8_t *psdu, uint16_t len, const struct frame_addr_info *info);
 
 int  fpb_short_add(uint16_t addr);

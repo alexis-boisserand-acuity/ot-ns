@@ -90,7 +90,7 @@ static void deliver_rx(const struct otns_radio_event *ev, bool acked_with_fpb)
     net_pkt_set_ieee802154_lqi(pkt, LQI_PERFECT);
     net_pkt_set_ieee802154_rssi_dbm(pkt, ev->data.mPower);
     net_pkt_set_ieee802154_ack_fpb(pkt, acked_with_fpb);
-    net_pkt_set_timestamp_ns(pkt, k_ticks_to_ns_floor64(k_uptime_ticks()));
+    net_pkt_set_timestamp_ns(pkt, ev->timestamp_us * NSEC_PER_USEC);
 
     if (net_recv_data(data.iface, pkt) < 0)
     {
@@ -106,9 +106,7 @@ static void handle_rx_done(const struct otns_radio_event *ev)
         return;
     }
 
-    uint16_t fcf = sys_get_le16(ev->psdu);
-
-    if ((fcf & FCF_FRAME_TYPE_MASK) == FCF_FRAME_TYPE_ACK)
+    if (frame_is_ack(ev->psdu, ev->psdu_len))
     {
         if (data.tx_wants_ack && ev->psdu[SEQ_NUM_OFFSET] == data.tx_seq)
         {
@@ -119,8 +117,8 @@ static void handle_rx_done(const struct otns_radio_event *ev)
                 l = sizeof(data.ack_psdu);
             }
             memcpy(data.ack_psdu, ev->psdu, l);
-            data.ack_len = l;
-            k_sem_give(&data.tx_wait);
+            data.ack_len          = l;
+            data.ack_timestamp_us = ev->timestamp_us;
         }
         return;
     }
@@ -167,6 +165,8 @@ static int err_to_errno(uint8_t error)
         return 0;
     case OT_ERROR_CHANNEL_ACCESS_FAILURE:
         return -EBUSY;
+    case OT_ERROR_NO_ACK:
+        return -ENOMSG;
     case OT_ERROR_ABORT:
         return -EIO;
     default:
@@ -184,14 +184,10 @@ static void handle_tx_done(const struct otns_radio_event *ev)
             data.sleep_pending = false;
             nsi_otns_bottom_set_state(OT_RADIO_STATE_SLEEP, data.channel);
         }
-        k_sem_give(&data.ack_tx_done);
         return;
     }
     data.tx_result = err_to_errno(ev->data.mError);
-    if (!data.tx_wants_ack || data.tx_result != 0)
-    {
-        k_sem_give(&data.tx_wait);
-    }
+    k_sem_give(&data.tx_wait);
 }
 
 static void handle_chan_sample(const struct otns_radio_event *ev)
@@ -208,8 +204,8 @@ static void handle_chan_sample(const struct otns_radio_event *ev)
         }
         return;
     }
-    data.cca_channel_free =
-        (ev->data.mPower == (int8_t)OT_RADIO_RSSI_INVALID) || (ev->data.mPower < RFSIM_CCA_ED_THRESHOLD_DEFAULT_DBM);
+    data.cca_channel_free = ev->data.mError == OT_ERROR_NONE && (ev->data.mPower == (int8_t)OT_RADIO_RSSI_INVALID ||
+                                                                 ev->data.mPower < RFSIM_CCA_ED_THRESHOLD_DEFAULT_DBM);
     k_sem_give(&data.cca_wait);
 }
 

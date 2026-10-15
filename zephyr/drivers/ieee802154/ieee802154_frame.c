@@ -79,143 +79,15 @@ uint16_t crc16(const uint8_t *data, size_t len)
 /* 802.15.4 frame parsing                                                    */
 /* ------------------------------------------------------------------------- */
 
-static bool dst_pan_id_present_2015(uint8_t dst_mode, uint8_t src_mode, bool pc)
-{
-    if (dst_mode == ADDR_MODE_NONE)
-    {
-        return src_mode == ADDR_MODE_NONE && pc;
-    }
-    if (src_mode == ADDR_MODE_NONE || (src_mode == ADDR_MODE_EXT && dst_mode == ADDR_MODE_EXT))
-    {
-        return !pc;
-    }
-    return true;
-}
-
-static bool src_pan_id_present_2015(uint8_t dst_mode, uint8_t src_mode, bool pc)
-{
-    if (dst_mode == ADDR_MODE_EXT && src_mode == ADDR_MODE_EXT)
-    {
-        return false;
-    }
-    return src_mode != ADDR_MODE_NONE && !pc;
-}
-
-bool parse_frame(const uint8_t *psdu, uint16_t len, struct frame_addr_info *info)
-{
-    if (len < MIN_FRAME_SIZE)
-    {
-        return false;
-    }
-
-    memset(info, 0, sizeof(*info));
-    info->fcf      = sys_get_le16(psdu);
-    info->version  = (info->fcf & FCF_VERSION_MASK) >> FCF_VERSION_SHIFT;
-    info->dst_mode = (info->fcf & FCF_DST_MODE_MASK) >> FCF_DST_MODE_SHIFT;
-    info->src_mode = (info->fcf & FCF_SRC_MODE_MASK) >> FCF_SRC_MODE_SHIFT;
-    info->dst_off  = FRAME_OFF_NONE;
-    info->src_off  = FRAME_OFF_NONE;
-
-    bool pc  = (info->fcf & FCF_PAN_COMPR_BIT) != 0;
-    int  off = FCF_SIZE;
-
-    if (!(info->version == IEEE802154_VERSION_2015 && (info->fcf & FCF_SEQ_SUPPR_BIT)))
-    {
-        if (off >= len)
-        {
-            return false;
-        }
-        info->seq = psdu[off];
-        off += SEQ_NUM_SIZE;
-    }
-
-    bool dst_pan_present;
-    bool src_pan_present;
-    if (info->version == IEEE802154_VERSION_2015)
-    {
-        dst_pan_present = dst_pan_id_present_2015(info->dst_mode, info->src_mode, pc);
-        src_pan_present = src_pan_id_present_2015(info->dst_mode, info->src_mode, pc);
-    }
-    else
-    {
-        dst_pan_present = info->dst_mode != ADDR_MODE_NONE;
-        src_pan_present = info->src_mode != ADDR_MODE_NONE && !pc;
-    }
-
-    if (info->dst_mode != ADDR_MODE_NONE)
-    {
-        if (dst_pan_present)
-        {
-            if (off + PAN_ID_SIZE > len)
-            {
-                return -1;
-            }
-            info->dst_pan         = sys_get_le16(&psdu[off]);
-            info->dst_pan_present = true;
-            off += PAN_ID_SIZE;
-        }
-
-        info->dst_off = off;
-        off += (info->dst_mode == ADDR_MODE_EXT) ? OT_EXT_ADDRESS_SIZE : SHORT_ADDR_SIZE;
-        if (off > len)
-        {
-            return false;
-        }
-    }
-
-    if (info->src_mode != ADDR_MODE_NONE)
-    {
-        if (src_pan_present)
-        {
-            if (off + PAN_ID_SIZE > len)
-            {
-                return false;
-            }
-            info->src_pan         = sys_get_le16(&psdu[off]);
-            info->src_pan_present = true;
-            off += PAN_ID_SIZE;
-        }
-        info->src_off = off;
-        off += (info->src_mode == ADDR_MODE_EXT) ? OT_EXT_ADDRESS_SIZE : SHORT_ADDR_SIZE;
-        if (off > len)
-        {
-            return false;
-        }
-    }
-
-    return true;
-}
-
+/*
+ * parse_frame() and the ACK/address-matching primitives are implemented in
+ * ieee802154_frame_parse.c, which is compiled into both this embedded image
+ * and the host-side native_simulator executable, so the decision logic has
+ * a single source of truth on both sides.
+ */
 bool frame_is_for_me(const uint8_t *psdu, uint16_t len, struct frame_addr_info *info)
 {
-    if (!parse_frame(psdu, len, info))
-    {
-        return false;
-    }
-
-    if (info->dst_mode == ADDR_MODE_SHORT)
-    {
-        if (info->dst_off + SHORT_ADDR_SIZE > len)
-        {
-            return false;
-        }
-        if (sys_get_le16(&psdu[info->dst_off]) == OT_RADIO_BROADCAST_SHORT_ADDR)
-        {
-            return false;
-        }
-        return memcmp(&psdu[info->dst_off], data.short_addr, SHORT_ADDR_SIZE) == 0;
-    }
-
-    if (info->dst_mode == ADDR_MODE_EXT)
-    {
-        if (info->dst_off + OT_EXT_ADDRESS_SIZE > len)
-        {
-            return false;
-        }
-        return memcmp(&psdu[info->dst_off], data.ext_addr, OT_EXT_ADDRESS_SIZE) == 0;
-    }
-
-    return false;
+    return frame_addr_matches(psdu, len, info, data.short_addr, data.ext_addr);
 }
 
 /* ------------------------------------------------------------------------- */

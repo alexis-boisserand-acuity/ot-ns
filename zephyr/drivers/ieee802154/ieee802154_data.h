@@ -49,7 +49,6 @@ struct radio_data
 
     struct k_sem tx_wait;
     struct k_sem cca_wait;
-    struct k_sem ack_tx_done;
 
     int  tx_result;
     bool cca_channel_free;
@@ -58,6 +57,7 @@ struct radio_data
     uint8_t  tx_seq;
     uint8_t  ack_psdu[OT_RADIO_FRAME_MAX_SIZE];
     uint16_t ack_len;
+    uint64_t ack_timestamp_us;
 
     uint8_t pan_id[PAN_ID_SIZE];
     uint8_t short_addr[SHORT_ADDR_SIZE];

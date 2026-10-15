@@ -77,8 +77,6 @@ LOG_MODULE_REGISTER(LOG_MODULE_NAME);
 #define EUI64_BYTE_2 0x30
 #define EUI64_BYTE_3 0x00
 
-#define ACK_ALLOWANCE_US 1000U
-
 #define OPENTHREAD_MTU 1280
 
 struct radio_data data;
@@ -100,7 +98,6 @@ static enum ieee802154_hw_caps get_capabilities(const struct device *dev)
 static int energy_scan(const struct device *dev, uint16_t duration, energy_scan_done_cb_t done_cb)
 {
     ARG_UNUSED(dev);
-    ARG_UNUSED(duration);
 
     if (!data.started || !nsi_otns_bottom_is_connected())
     {
@@ -114,7 +111,7 @@ static int energy_scan(const struct device *dev, uint16_t duration, energy_scan_
     data.ed_scan_pending = true;
     data.ed_done_cb      = done_cb;
 
-    if (nsi_otns_bottom_cca(data.channel) < 0)
+    if (nsi_otns_bottom_energy_scan(data.channel, duration) < 0)
     {
         data.ed_scan_pending = false;
         data.ed_done_cb      = NULL;
@@ -147,7 +144,7 @@ static int cca(const struct device *dev)
 
     if (k_sem_take(&data.cca_wait, K_MSEC(CCA_TIMEOUT_MS)) != 0)
     {
-        return 0;
+        return -EBUSY;
     }
 
     return data.cca_channel_free ? 0 : -EBUSY;
@@ -202,11 +199,13 @@ static int filter(const struct device            *dev,
         }
         irq_unlock(key);
         nsi_otns_bottom_send_ext_addr(ext_addr_be);
+        nsi_otns_bottom_set_own_addr(data.short_addr, data.ext_addr);
         return 0;
     }
     case IEEE802154_FILTER_TYPE_SHORT_ADDR:
         sys_put_le16(filter->short_addr, data.short_addr);
         irq_unlock(key);
+        nsi_otns_bottom_set_own_addr(data.short_addr, data.ext_addr);
         return 0;
     case IEEE802154_FILTER_TYPE_PAN_ID:
         sys_put_le16(filter->pan_id, data.pan_id);
@@ -225,6 +224,7 @@ static int set_txpower(const struct device *dev, int16_t dbm)
     unsigned int key = irq_lock();
     data.txpower     = (int8_t)dbm;
     irq_unlock(key);
+    nsi_otns_bottom_set_txpower(data.txpower);
     return 0;
 }
 
@@ -295,50 +295,14 @@ static int tx_build_psdu(struct net_buf *frag, uint16_t len, uint8_t *psdu)
     return 0;
 }
 
-static int tx_send_frame(const uint8_t *psdu, uint16_t air_len)
+static int tx_send_frame(const uint8_t *psdu, uint16_t air_len, bool cca)
 {
-    for (;;)
-    {
-        unsigned int key = irq_lock();
-
-        if (!data.ack_tx_pending)
-        {
-            nsi_otns_bottom_set_state(OT_RADIO_STATE_TRANSMIT, data.channel);
-            irq_unlock(key);
-            break;
-        }
-
-        irq_unlock(key);
-        k_sem_take(&data.ack_tx_done, K_FOREVER);
-    }
-
-    if (nsi_otns_bottom_tx(data.channel, data.txpower, psdu, air_len) < 0)
-    {
-        return -EIO;
-    }
-
-    nsi_otns_bottom_set_state(OT_RADIO_STATE_RECEIVE, data.channel);
-
-    return 0;
+    return nsi_otns_bottom_tx(data.channel, data.txpower, psdu, air_len, cca);
 }
 
-static int tx_wait_for_result(uint16_t len)
+static int tx_wait_for_result(void)
 {
-    if (data.tx_wants_ack)
-    {
-        uint32_t frame_us =
-            (OT_RADIO_SHR_PHR_LENGTH_BYTES + len + FCS_SIZE) * (OT_RADIO_SYMBOLS_PER_OCTET * OT_RADIO_SYMBOL_TIME);
-
-        if (k_sem_take(&data.tx_wait, K_USEC(frame_us + ACK_ALLOWANCE_US)) != 0)
-        {
-            return -ENOMSG;
-        }
-    }
-    else
-    {
-        (void)k_sem_take(&data.tx_wait, K_FOREVER);
-    }
-
+    (void)k_sem_take(&data.tx_wait, K_FOREVER);
     return data.tx_result;
 }
 
@@ -357,7 +321,7 @@ static void tx_deliver_ack(void)
     {
         net_pkt_set_ieee802154_lqi(ack_pkt, LQI_PERFECT);
         net_pkt_set_ieee802154_rssi_dbm(ack_pkt, 0);
-        net_pkt_set_timestamp_ns(ack_pkt, k_ticks_to_ns_floor64(k_uptime_ticks()));
+        net_pkt_set_timestamp_ns(ack_pkt, data.ack_timestamp_us * NSEC_PER_USEC);
         net_pkt_cursor_init(ack_pkt);
         if (ieee802154_handle_ack(data.iface, ack_pkt) != NET_OK)
         {
@@ -369,9 +333,9 @@ static void tx_deliver_ack(void)
     net_pkt_unref(ack_pkt);
 }
 
-static int tx_await_outcome(uint16_t len)
+static int tx_await_outcome(void)
 {
-    int rc = tx_wait_for_result(len);
+    int rc = tx_wait_for_result();
 
     if (rc != 0)
     {
@@ -405,15 +369,6 @@ static int tx(const struct device *dev, enum ieee802154_tx_mode mode, struct net
         return rc;
     }
 
-    if (mode == IEEE802154_TX_MODE_CCA)
-    {
-        rc = cca(dev);
-        if (rc != 0)
-        {
-            return rc;
-        }
-    }
-
     uint8_t psdu[OT_RADIO_FRAME_MAX_SIZE];
 
     rc = tx_build_psdu(frag, len, psdu);
@@ -429,13 +384,13 @@ static int tx(const struct device *dev, enum ieee802154_tx_mode mode, struct net
 
     k_sem_reset(&data.tx_wait);
 
-    rc = tx_send_frame(psdu, len + FCS_SIZE);
+    rc = tx_send_frame(psdu, len + FCS_SIZE, mode == IEEE802154_TX_MODE_CCA);
     if (rc == 0)
     {
-        rc = tx_await_outcome(len);
+        rc = tx_await_outcome();
     }
 
-    nsi_otns_bottom_set_state(OT_RADIO_STATE_RECEIVE, data.channel);
+    data.tx_wants_ack = false;
     return rc;
 }
 
@@ -600,7 +555,6 @@ static int init(const struct device *dev)
 
     k_sem_init(&data.tx_wait, 0, 1);
     k_sem_init(&data.cca_wait, 0, 1);
-    k_sem_init(&data.ack_tx_done, 0, 1);
 
     data.channel = kMinChannel;
     data.txpower = 0;

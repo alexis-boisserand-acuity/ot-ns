@@ -53,6 +53,7 @@
 #include "nsi_tasks.h"
 #include "nsi_tracing.h"
 
+#include "ieee802154_frame.h"
 #include "ieee802154_priv.h"
 
 #define PHY_BITRATE_DEFAULT 250000U
@@ -83,19 +84,52 @@ static bool                    have_pending;
 static struct otns_radio_event deliver_ev;
 static bool                    deliver_ready;
 
-static uint64_t ack_time = NSI_NEVER;
 static uint8_t  ack_channel;
 static int8_t   ack_power;
 static uint8_t  ack_psdu[OT_RADIO_FRAME_MAX_SIZE];
 static uint16_t ack_psdu_len;
 
-static uint8_t radio_state      = OT_RADIO_STATE_DISABLED;
-static uint8_t radio_channel    = OT_RADIO_2P4GHZ_OQPSK_CHANNEL_MIN;
-static uint8_t reported_state   = OT_RADIO_STATE_INVALID;
-static uint8_t reported_channel = OT_RADIO_STATE_INVALID;
+static uint8_t                 radio_state         = OT_RADIO_STATE_DISABLED;
+static uint8_t                 radio_channel       = OT_RADIO_2P4GHZ_OQPSK_CHANNEL_MIN;
+static uint8_t                 current_channel     = OT_RADIO_2P4GHZ_OQPSK_CHANNEL_MIN;
+static uint8_t                 reported_state      = OT_RADIO_STATE_INVALID;
+static uint8_t                 reported_channel    = OT_RADIO_STATE_INVALID;
+static RadioSubState           radio_sub_state     = RFSIM_RADIO_SUBSTATE_READY;
+static RadioSubState           reported_sub_state  = RFSIM_RADIO_SUBSTATE_INVALID;
+static uint64_t                radio_event_time    = NSI_NEVER;
+static uint64_t                reported_event_time = NSI_NEVER;
+static int8_t                  radio_power;
+static int8_t                  reported_power;
+static int8_t                  reported_sensitivity;
+static bool                    tx_pending;
+static bool                    tx_wait;
+static bool                    tx_cca;
+static bool                    tx_wants_ack;
+static uint8_t                 tx_channel;
+static int8_t                  tx_power;
+static uint8_t                 tx_psdu[OT_RADIO_FRAME_MAX_SIZE];
+static uint16_t                tx_len;
+static uint64_t                last_tx_ifs = OT_RADIO_SIFS_TIME_US;
+static bool                    sample_pending;
+static bool                    energy_scan;
+static uint64_t                sample_duration;
+static uint8_t                 sample_channel;
+static struct otns_radio_event sample_result;
+static bool                    sleep_pending;
+static uint64_t                rx_timestamp_us;
+
+static void report_state(void);
+static void radio_timer_fired(void);
+static void start_pending_operation(void);
+static void wake_pacer_now(void);
+static void complete_tx(uint8_t error);
+static void cancel_sample(void);
 
 static uint8_t ext_addr[OT_EXT_ADDRESS_SIZE];
 static bool    ext_addr_valid;
+
+static uint8_t own_short_addr[SHORT_ADDR_SIZE];
+static uint8_t own_ext_addr[OT_EXT_ADDRESS_SIZE];
 
 static int8_t   s_rx_sensitivity  = RFSIM_RX_SENSITIVITY_DEFAULT_DBM;
 static uint64_t s_phy_bitrate     = PHY_BITRATE_DEFAULT;
@@ -123,6 +157,25 @@ static inline void put_le64(uint8_t *p, uint64_t v)
 static inline int32_t get_le32(const uint8_t *p)
 {
     return (int32_t)((uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24));
+}
+
+static uint64_t get_le64(const uint8_t *bytes)
+{
+    uint64_t value = 0;
+
+    for (unsigned int index = 0; index < 8; index++)
+    {
+        value |= (uint64_t)bytes[index] << (8 * index);
+    }
+    return value;
+}
+
+static void set_sub_state(RadioSubState state, uint64_t duration)
+{
+    radio_sub_state  = state;
+    radio_event_time = duration == NSI_NEVER ? NSI_NEVER : nsi_hws_get_time() + duration;
+    nsi_hws_find_next_event();
+    wake_pacer_now();
 }
 
 static inline void put_le32(uint8_t *p, int32_t v)
@@ -261,14 +314,20 @@ static int write_event(uint8_t type, uint64_t delay, const uint8_t *data, uint16
 
 static void disconnect(void)
 {
+    disabled = true;
+    complete_tx(OT_ERROR_ABORT);
+    cancel_sample();
     if (fd >= 0)
     {
         close(fd);
         fd = -1;
     }
-    connected  = false;
-    disabled   = true;
-    pacer_time = NSI_NEVER;
+    connected        = false;
+    disabled         = true;
+    pacer_time       = NSI_NEVER;
+    radio_event_time = NSI_NEVER;
+    tx_pending       = false;
+    sample_pending   = false;
     nsi_print_warning("ieee802154_otns: disconnected from OTNS\n");
 }
 
@@ -343,7 +402,7 @@ static uint64_t next_other_event(void)
     return next;
 }
 
-static void deliver_to_embedded(const struct otns_radio_event *ev)
+static void raise_embedded(const struct otns_radio_event *ev)
 {
     deliver_ev    = *ev;
     deliver_ready = true;
@@ -351,13 +410,222 @@ static void deliver_to_embedded(const struct otns_radio_event *ev)
     hw_irq_ctrl_raise_im(IEEE802154_OTNS_IRQ);
 }
 
+static void complete_tx(uint8_t error)
+{
+    struct otns_radio_event result = {0};
+
+    if (!tx_pending)
+    {
+        return;
+    }
+    tx_pending           = false;
+    tx_wait              = false;
+    radio_state          = OT_RADIO_STATE_RECEIVE;
+    result.type          = OT_SIM_EVENT_RADIO_TX_DONE;
+    result.data.mChannel = radio_channel;
+    result.data.mError   = error;
+    raise_embedded(&result);
+}
+
+static void cancel_sample(void)
+{
+    struct otns_radio_event result = {0};
+
+    if (!sample_pending)
+    {
+        return;
+    }
+    sample_pending       = false;
+    result.type          = OT_SIM_EVENT_RADIO_CHAN_SAMPLE;
+    result.data.mChannel = radio_channel;
+    result.data.mPower   = (int8_t)OT_RADIO_RSSI_INVALID;
+    result.data.mError   = OT_ERROR_ABORT;
+    raise_embedded(&result);
+}
+
+static uint64_t tx_ifs_time(void) { return last_tx_ifs; }
+
+static void handle_comm_start_event(const struct otns_radio_event *ev)
+{
+    if ((radio_state == OT_RADIO_STATE_RECEIVE || radio_state == OT_RADIO_STATE_TRANSMIT) &&
+        ev->data.mError == OT_ERROR_NONE &&
+        (radio_sub_state == RFSIM_RADIO_SUBSTATE_READY || radio_sub_state == RFSIM_RADIO_SUBSTATE_IFS_WAIT ||
+         radio_sub_state == RFSIM_RADIO_SUBSTATE_TX_AIFS_WAIT))
+    {
+        set_sub_state(radio_sub_state == RFSIM_RADIO_SUBSTATE_TX_AIFS_WAIT ? RFSIM_RADIO_SUBSTATE_TX_ACK_RX_ONGOING
+                                                                           : RFSIM_RADIO_SUBSTATE_RX_FRAME_ONGOING,
+                      ev->data.mDuration + FAILSAFE_TIME_US);
+        rx_timestamp_us = nsi_hws_get_time() + OT_RADIO_SHR_DURATION_US;
+    }
+}
+
+static void radio_receive(const struct otns_radio_event *ev, const struct otns_radio_event *received)
+{
+    bool is_ack = frame_is_ack(ev->psdu, ev->psdu_len);
+
+    if (tx_wait && tx_wants_ack)
+    {
+        bool is_awaited_ack_received = is_ack && ev->data.mError == OT_ERROR_NONE && ev->psdu_len >= ACK_FRAME_SIZE &&
+                                       ev->psdu[SEQ_NUM_OFFSET] == tx_psdu[SEQ_NUM_OFFSET];
+
+        if (is_awaited_ack_received)
+        {
+            raise_embedded(received);
+        }
+        complete_tx(is_awaited_ack_received ? OT_ERROR_NONE : OT_ERROR_NO_ACK);
+    }
+    else if (!is_ack && ev->data.mError == OT_ERROR_NONE)
+    {
+        raise_embedded(received);
+    }
+}
+
+static void apply_radio_delayed_sleep(void)
+{
+    if (sleep_pending)
+    {
+        sleep_pending = false;
+        radio_state   = OT_RADIO_STATE_SLEEP;
+    }
+}
+
+static void handle_rx_done_event(const struct otns_radio_event *ev)
+{
+    struct otns_radio_event received = *ev;
+    struct frame_addr_info  info;
+
+    if (radio_sub_state != RFSIM_RADIO_SUBSTATE_RX_FRAME_ONGOING &&
+        radio_sub_state != RFSIM_RADIO_SUBSTATE_TX_ACK_RX_ONGOING)
+    {
+        return;
+    }
+
+    bool is_ack           = frame_is_ack(ev->psdu, ev->psdu_len);
+    bool is_ack_requested = frame_is_ack_requested(ev->psdu, ev->psdu_len);
+    bool is_addr_match    = frame_addr_matches(ev->psdu, ev->psdu_len, &info, own_short_addr, own_ext_addr);
+
+    received.timestamp_us = rx_timestamp_us;
+
+    if (radio_sub_state == RFSIM_RADIO_SUBSTATE_RX_FRAME_ONGOING && ev->data.mError == OT_ERROR_NONE &&
+        is_ack_requested && !is_ack && is_addr_match)
+    {
+        set_sub_state(RFSIM_RADIO_SUBSTATE_RX_AIFS_WAIT, OT_RADIO_AIFS_TIME_US);
+    }
+    else if (radio_sub_state == RFSIM_RADIO_SUBSTATE_RX_FRAME_ONGOING)
+    {
+        set_sub_state(RFSIM_RADIO_SUBSTATE_IFS_WAIT, RFSIM_TURNAROUND_TIME_US);
+        apply_radio_delayed_sleep();
+    }
+    else
+    {
+        set_sub_state(RFSIM_RADIO_SUBSTATE_IFS_WAIT, tx_ifs_time());
+    }
+
+    radio_receive(ev, &received);
+}
+
+static void handle_tx_done_event(const struct otns_radio_event *ev)
+{
+    if (radio_sub_state == RFSIM_RADIO_SUBSTATE_RX_ACK_TX_ONGOING)
+    {
+        set_sub_state(RFSIM_RADIO_SUBSTATE_RX_TX_TO_RX, RFSIM_TURNAROUND_TIME_US);
+        apply_radio_delayed_sleep();
+        raise_embedded(ev);
+    }
+    else if (radio_sub_state == RFSIM_RADIO_SUBSTATE_TX_FRAME_ONGOING)
+    {
+        if (!tx_wants_ack || ev->data.mError != OT_ERROR_NONE)
+        {
+            set_sub_state(RFSIM_RADIO_SUBSTATE_TX_TX_TO_RX, RFSIM_TURNAROUND_TIME_US);
+            complete_tx(ev->data.mError);
+        }
+        else
+        {
+            set_sub_state(RFSIM_RADIO_SUBSTATE_TX_TX_TO_AIFS, RFSIM_TURNAROUND_TIME_US);
+        }
+    }
+}
+
+static void handle_chan_sample_event(const struct otns_radio_event *ev)
+{
+    if (radio_sub_state == RFSIM_RADIO_SUBSTATE_RX_ENERGY_SCAN)
+    {
+        sample_pending = false;
+        set_sub_state(RFSIM_RADIO_SUBSTATE_READY, NSI_NEVER);
+        radio_channel = current_channel;
+        raise_embedded(ev);
+    }
+    else if (radio_sub_state == RFSIM_RADIO_SUBSTATE_TX_CCA)
+    {
+        bool clear = ev->data.mError == OT_ERROR_NONE && (ev->data.mPower == (int8_t)OT_RADIO_RSSI_INVALID ||
+                                                          ev->data.mPower < RFSIM_CCA_ED_THRESHOLD_DEFAULT_DBM);
+
+        if (clear)
+        {
+            sample_result = *ev;
+            set_sub_state(RFSIM_RADIO_SUBSTATE_TX_CCA_TO_TX, RFSIM_TURNAROUND_TIME_US);
+        }
+        else
+        {
+            set_sub_state(RFSIM_RADIO_SUBSTATE_READY, NSI_NEVER);
+            radio_channel = current_channel;
+            if (tx_pending)
+            {
+                complete_tx(OT_ERROR_CHANNEL_ACCESS_FAILURE);
+            }
+            else
+            {
+                sample_pending = false;
+                raise_embedded(ev);
+            }
+        }
+    }
+}
+
+static void deliver_to_embedded(const struct otns_radio_event *ev)
+{
+    if (radio_event_time <= nsi_hws_get_time() && radio_sub_state == RFSIM_RADIO_SUBSTATE_TX_TX_TO_AIFS)
+    {
+        radio_timer_fired();
+    }
+
+    if (ev->data.mChannel != radio_channel)
+    {
+        return;
+    }
+
+    switch (ev->type)
+    {
+    case OT_SIM_EVENT_RADIO_COMM_START:
+        handle_comm_start_event(ev);
+        return;
+
+    case OT_SIM_EVENT_RADIO_RX_DONE:
+        handle_rx_done_event(ev);
+        return;
+
+    case OT_SIM_EVENT_RADIO_TX_DONE:
+        handle_tx_done_event(ev);
+        return;
+
+    case OT_SIM_EVENT_RADIO_CHAN_SAMPLE:
+        handle_chan_sample_event(ev);
+        return;
+
+    default:
+        return;
+    }
+}
+
 static void parse_radio_event(struct otns_radio_event *out, const struct Event *raw)
 {
-    out->type          = raw->mEvent;
-    out->data.mChannel = raw->mData[0];
-    out->data.mPower   = (int8_t)raw->mData[1];
-    out->data.mError   = raw->mData[2];
-    out->psdu_len      = 0;
+    out->type           = raw->mEvent;
+    out->data.mChannel  = raw->mData[0];
+    out->data.mPower    = (int8_t)raw->mData[1];
+    out->data.mError    = raw->mData[2];
+    out->data.mDuration = get_le64(&raw->mData[3]);
+    out->timestamp_us   = 0;
+    out->psdu_len       = 0;
 
     if (raw->mEvent == OT_SIM_EVENT_RADIO_RX_DONE || raw->mEvent == OT_SIM_EVENT_RADIO_COMM_START)
     {
@@ -377,8 +645,8 @@ static void parse_radio_event(struct otns_radio_event *out, const struct Event *
 
 static int event_is_for_embedded(uint8_t type)
 {
-    return type == OT_SIM_EVENT_RADIO_RX_DONE || type == OT_SIM_EVENT_RADIO_TX_DONE ||
-           type == OT_SIM_EVENT_RADIO_CHAN_SAMPLE;
+    return type == OT_SIM_EVENT_RADIO_COMM_START || type == OT_SIM_EVENT_RADIO_RX_DONE ||
+           type == OT_SIM_EVENT_RADIO_TX_DONE || type == OT_SIM_EVENT_RADIO_CHAN_SAMPLE;
 }
 
 static void handle_rfsim_param_event(uint8_t event_type, const uint8_t *data, uint16_t datalen)
@@ -456,28 +724,46 @@ static void report_state(void)
 {
     uint8_t data[sizeof(struct RadioStateEventData)];
 
-    if (radio_state == reported_state && radio_channel == reported_channel)
+    if (radio_state == reported_state && radio_channel == reported_channel && radio_sub_state == reported_sub_state &&
+        radio_event_time == reported_event_time && radio_power == reported_power &&
+        s_rx_sensitivity == reported_sensitivity)
     {
         return;
     }
 
-    if (radio_state == OT_RADIO_STATE_DISABLED)
+    uint8_t  energy_state = radio_state;
+    uint64_t now          = nsi_hws_get_time();
+    uint64_t delay        = (radio_event_time != NSI_NEVER && radio_event_time > now) ? radio_event_time - now : 0;
+
+    if (radio_sub_state == RFSIM_RADIO_SUBSTATE_TX_FRAME_ONGOING ||
+        radio_sub_state == RFSIM_RADIO_SUBSTATE_RX_ACK_TX_ONGOING)
     {
-        return;
+        energy_state = OT_RADIO_STATE_TRANSMIT;
+    }
+    else if (radio_state == OT_RADIO_STATE_TRANSMIT || radio_sub_state == RFSIM_RADIO_SUBSTATE_RX_FRAME_ONGOING)
+    {
+        energy_state = OT_RADIO_STATE_RECEIVE;
     }
 
     data[0] = radio_channel;
-    data[1] = 0;
+    data[1] = (uint8_t)radio_power;
     data[2] = (uint8_t)s_rx_sensitivity;
-    data[3] = radio_state;
-    data[4] = 0;
+    data[3] = energy_state;
+    data[4] = (uint8_t)radio_sub_state;
     data[5] = radio_state;
-    put_le64(&data[6], nsi_hws_get_time());
+    put_le64(&data[6], now);
 
-    (void)write_event(OT_SIM_EVENT_RADIO_STATE, 0, data, sizeof(data));
+    if (write_event(OT_SIM_EVENT_RADIO_STATE, delay, data, sizeof(data)) < 0)
+    {
+        return;
+    }
 
-    reported_state   = radio_state;
-    reported_channel = radio_channel;
+    reported_state       = radio_state;
+    reported_channel     = radio_channel;
+    reported_sub_state   = radio_sub_state;
+    reported_event_time  = radio_event_time;
+    reported_power       = radio_power;
+    reported_sensitivity = s_rx_sensitivity;
 }
 
 static void pacer(void)
@@ -663,7 +949,7 @@ static void wake_pacer_now(void)
     nsi_hws_find_next_event();
 }
 
-int nsi_otns_bottom_tx(uint8_t channel, int8_t power, const uint8_t *psdu, uint16_t len)
+static int send_frame(uint8_t channel, int8_t power, const uint8_t *psdu, uint16_t len, bool ack)
 {
     if (!connected)
     {
@@ -686,6 +972,16 @@ int nsi_otns_bottom_tx(uint8_t channel, int8_t power, const uint8_t *psdu, uint1
     uint16_t hdr_len = RADIO_COMM_EVENT_DATA_SIZE + RADIO_MSG_HDR;
     memcpy(&data[hdr_len], psdu, len);
 
+    radio_channel = channel;
+    radio_power   = power;
+    if (!ack)
+    {
+        last_tx_ifs = len > OT_RADIO_aMaxSifsFrameSize ? OT_RADIO_LIFS_TIME_US : OT_RADIO_SIFS_TIME_US;
+    }
+    set_sub_state(ack ? RFSIM_RADIO_SUBSTATE_RX_ACK_TX_ONGOING : RFSIM_RADIO_SUBSTATE_TX_FRAME_ONGOING,
+                  duration + FAILSAFE_TIME_US);
+    report_state();
+
     if (write_event(OT_SIM_EVENT_RADIO_COMM_START, 0, data, (uint16_t)(hdr_len + len)) < 0)
     {
         return -1;
@@ -695,13 +991,190 @@ int nsi_otns_bottom_tx(uint8_t channel, int8_t power, const uint8_t *psdu, uint1
     return 0;
 }
 
-static void ack_timer_fired(void)
+static int send_sample(uint64_t duration)
 {
-    ack_time = NSI_NEVER;
-    (void)nsi_otns_bottom_tx(ack_channel, ack_power, ack_psdu, ack_psdu_len);
+    uint8_t data[RADIO_COMM_EVENT_DATA_SIZE];
+
+    data[0] = radio_channel;
+    data[1] = 0;
+    data[2] = OT_ERROR_NONE;
+    put_le64(&data[3], duration);
+    report_state();
+    return write_event(OT_SIM_EVENT_RADIO_CHAN_SAMPLE, 0, data, sizeof(data));
 }
 
-NSI_HW_EVENT(ack_time, ack_timer_fired, 940);
+static void start_pending_operation(void)
+{
+    if (radio_sub_state != RFSIM_RADIO_SUBSTATE_READY)
+    {
+        return;
+    }
+    if (tx_pending)
+    {
+        radio_state   = OT_RADIO_STATE_TRANSMIT;
+        radio_channel = tx_channel;
+        tx_wait       = true;
+        if (tx_cca)
+        {
+            set_sub_state(RFSIM_RADIO_SUBSTATE_TX_CCA, OT_RADIO_CCA_TIME_US + FAILSAFE_TIME_US);
+            if (send_sample(OT_RADIO_CCA_TIME_US) < 0)
+            {
+                set_sub_state(RFSIM_RADIO_SUBSTATE_READY, NSI_NEVER);
+                complete_tx(OT_ERROR_ABORT);
+            }
+        }
+        else
+        {
+            set_sub_state(RFSIM_RADIO_SUBSTATE_TX_CCA_TO_TX, RFSIM_TURNAROUND_TIME_US);
+        }
+    }
+    else if (sample_pending)
+    {
+        radio_channel = sample_channel;
+        set_sub_state(energy_scan ? RFSIM_RADIO_SUBSTATE_RX_ENERGY_SCAN : RFSIM_RADIO_SUBSTATE_TX_CCA,
+                      sample_duration + FAILSAFE_TIME_US);
+        if (send_sample(sample_duration) < 0)
+        {
+            set_sub_state(RFSIM_RADIO_SUBSTATE_READY, NSI_NEVER);
+            cancel_sample();
+        }
+    }
+}
+
+static void radio_timer_fired(void)
+{
+    struct otns_radio_event result = {0};
+
+    result.data.mChannel = radio_channel;
+    result.data.mError   = OT_ERROR_ABORT;
+    switch (radio_sub_state)
+    {
+    case RFSIM_RADIO_SUBSTATE_STARTUP:
+    case RFSIM_RADIO_SUBSTATE_IFS_WAIT:
+        set_sub_state(RFSIM_RADIO_SUBSTATE_READY, NSI_NEVER);
+        radio_channel = current_channel;
+        start_pending_operation();
+        break;
+
+    case RFSIM_RADIO_SUBSTATE_TX_CCA:
+    case RFSIM_RADIO_SUBSTATE_RX_ENERGY_SCAN:
+        set_sub_state(RFSIM_RADIO_SUBSTATE_READY, NSI_NEVER);
+        radio_channel = current_channel;
+        if (tx_pending)
+        {
+            complete_tx(OT_ERROR_CHANNEL_ACCESS_FAILURE);
+        }
+        else if (sample_pending)
+        {
+            cancel_sample();
+        }
+        break;
+
+    case RFSIM_RADIO_SUBSTATE_TX_CCA_TO_TX:
+        if (tx_pending)
+        {
+            if (send_frame(tx_channel, tx_power, tx_psdu, tx_len, false) < 0)
+            {
+                set_sub_state(RFSIM_RADIO_SUBSTATE_READY, NSI_NEVER);
+                complete_tx(OT_ERROR_ABORT);
+            }
+        }
+        else
+        {
+            sample_pending = false;
+            set_sub_state(RFSIM_RADIO_SUBSTATE_READY, NSI_NEVER);
+            radio_channel = current_channel;
+            raise_embedded(&sample_result);
+        }
+        break;
+
+    case RFSIM_RADIO_SUBSTATE_TX_FRAME_ONGOING:
+        set_sub_state(RFSIM_RADIO_SUBSTATE_TX_TX_TO_RX, RFSIM_TURNAROUND_TIME_US);
+        complete_tx(OT_ERROR_ABORT);
+        break;
+
+    case RFSIM_RADIO_SUBSTATE_TX_TX_TO_RX:
+        radio_channel = current_channel;
+        set_sub_state(RFSIM_RADIO_SUBSTATE_IFS_WAIT, tx_ifs_time() - RFSIM_TURNAROUND_TIME_US);
+        break;
+
+    case RFSIM_RADIO_SUBSTATE_TX_TX_TO_AIFS:
+        set_sub_state(RFSIM_RADIO_SUBSTATE_TX_AIFS_WAIT, OT_RADIO_MAX_ACK_WAIT_US);
+        break;
+
+    case RFSIM_RADIO_SUBSTATE_TX_AIFS_WAIT:
+        set_sub_state(RFSIM_RADIO_SUBSTATE_READY, NSI_NEVER);
+        radio_channel = current_channel;
+        complete_tx(OT_ERROR_NO_ACK);
+        break;
+
+    case RFSIM_RADIO_SUBSTATE_TX_ACK_RX_ONGOING:
+        set_sub_state(RFSIM_RADIO_SUBSTATE_IFS_WAIT, tx_ifs_time());
+        complete_tx(OT_ERROR_NO_ACK);
+        break;
+
+    case RFSIM_RADIO_SUBSTATE_RX_FRAME_ONGOING:
+        set_sub_state(RFSIM_RADIO_SUBSTATE_IFS_WAIT, RFSIM_TURNAROUND_TIME_US);
+        apply_radio_delayed_sleep();
+        break;
+
+    case RFSIM_RADIO_SUBSTATE_RX_AIFS_WAIT:
+        if (send_frame(ack_channel, ack_power, ack_psdu, ack_psdu_len, true) == 0)
+        {
+            break;
+        }
+        set_sub_state(RFSIM_RADIO_SUBSTATE_RX_TX_TO_RX, RFSIM_TURNAROUND_TIME_US);
+        result.type = OT_SIM_EVENT_RADIO_TX_DONE;
+        raise_embedded(&result);
+        break;
+
+    case RFSIM_RADIO_SUBSTATE_RX_ACK_TX_ONGOING:
+        set_sub_state(RFSIM_RADIO_SUBSTATE_RX_TX_TO_RX, RFSIM_TURNAROUND_TIME_US);
+        apply_radio_delayed_sleep();
+        result.type = OT_SIM_EVENT_RADIO_TX_DONE;
+        raise_embedded(&result);
+        break;
+
+    case RFSIM_RADIO_SUBSTATE_RX_TX_TO_RX:
+        set_sub_state(RFSIM_RADIO_SUBSTATE_IFS_WAIT, RFSIM_TURNAROUND_TIME_US);
+        break;
+
+    default:
+        radio_event_time = NSI_NEVER;
+        break;
+    }
+}
+
+NSI_HW_EVENT(radio_event_time, radio_timer_fired, 940);
+
+int nsi_otns_bottom_tx(uint8_t channel, int8_t power, const uint8_t *psdu, uint16_t len, bool cca)
+{
+    if (!connected || radio_state == OT_RADIO_STATE_SLEEP || radio_state == OT_RADIO_STATE_DISABLED)
+    {
+        return -EIO;
+    }
+    if (len < 3 || len > OT_RADIO_FRAME_MAX_SIZE)
+    {
+        return -EINVAL;
+    }
+    if (tx_pending || sample_pending ||
+        (radio_sub_state != RFSIM_RADIO_SUBSTATE_READY && radio_sub_state != RFSIM_RADIO_SUBSTATE_IFS_WAIT &&
+         radio_sub_state != RFSIM_RADIO_SUBSTATE_STARTUP && radio_sub_state != RFSIM_RADIO_SUBSTATE_TX_TX_TO_RX))
+    {
+        return -EBUSY;
+    }
+    memcpy(tx_psdu, psdu, len);
+    tx_len       = len;
+    tx_channel   = channel;
+    tx_power     = power;
+    tx_wants_ack = (psdu[0] & 0x20) != 0;
+    tx_cca       = cca;
+    tx_pending   = true;
+    radio_state  = OT_RADIO_STATE_TRANSMIT;
+    start_pending_operation();
+    wake_pacer_now();
+    return 0;
+}
 
 int nsi_otns_bottom_tx_after(uint8_t channel, int8_t power, const uint8_t *psdu, uint16_t len, uint32_t delay_us)
 {
@@ -718,39 +1191,86 @@ int nsi_otns_bottom_tx_after(uint8_t channel, int8_t power, const uint8_t *psdu,
     ack_power   = power;
     memcpy(ack_psdu, psdu, len);
     ack_psdu_len = len;
-    ack_time     = nsi_hws_get_time() + delay_us;
-
-    nsi_hws_find_next_event();
+    set_sub_state(RFSIM_RADIO_SUBSTATE_RX_AIFS_WAIT, delay_us);
     return 0;
 }
 
-int nsi_otns_bottom_cca(uint8_t channel)
+static int request_sample(uint8_t channel, uint64_t duration, bool scan)
 {
-    uint8_t data[RADIO_COMM_EVENT_DATA_SIZE];
-
     if (!connected)
     {
-        return -1;
+        return -EIO;
     }
-
-    data[0] = channel;
-    data[1] = 0;
-    data[2] = OT_ERROR_NONE;
-    put_le64(&data[3], OT_RADIO_CCA_TIME_US);
-
-    if (write_event(OT_SIM_EVENT_RADIO_CHAN_SAMPLE, 0, data, sizeof(data)) < 0)
+    if (tx_pending || sample_pending ||
+        (radio_sub_state != RFSIM_RADIO_SUBSTATE_READY && radio_sub_state != RFSIM_RADIO_SUBSTATE_IFS_WAIT &&
+         radio_sub_state != RFSIM_RADIO_SUBSTATE_STARTUP))
     {
-        return -1;
+        return -EBUSY;
     }
-
+    sample_channel  = channel;
+    sample_pending  = true;
+    energy_scan     = scan;
+    sample_duration = duration;
+    start_pending_operation();
     wake_pacer_now();
     return 0;
 }
 
+int nsi_otns_bottom_cca(uint8_t channel) { return request_sample(channel, OT_RADIO_CCA_TIME_US, false); }
+
+int nsi_otns_bottom_energy_scan(uint8_t channel, uint16_t duration_ms)
+{
+    return request_sample(channel, (uint64_t)duration_ms * 1000U, true);
+}
+
 void nsi_otns_bottom_set_state(uint8_t state, uint8_t channel)
 {
+    current_channel = channel;
+    if (state == OT_RADIO_STATE_RECEIVE && tx_pending && radio_state == OT_RADIO_STATE_TRANSMIT)
+    {
+        return;
+    }
+    if (state == OT_RADIO_STATE_SLEEP && (radio_sub_state == RFSIM_RADIO_SUBSTATE_RX_FRAME_ONGOING ||
+                                          radio_sub_state == RFSIM_RADIO_SUBSTATE_RX_AIFS_WAIT ||
+                                          radio_sub_state == RFSIM_RADIO_SUBSTATE_RX_ACK_TX_ONGOING))
+    {
+        sleep_pending = true;
+        return;
+    }
+    if (state == OT_RADIO_STATE_RECEIVE && radio_state == OT_RADIO_STATE_DISABLED)
+    {
+        set_sub_state(RFSIM_RADIO_SUBSTATE_STARTUP, RFSIM_STARTUP_TIME_US);
+    }
+    else if (state == OT_RADIO_STATE_RECEIVE && radio_state == OT_RADIO_STATE_SLEEP &&
+             radio_sub_state != RFSIM_RADIO_SUBSTATE_STARTUP)
+    {
+        set_sub_state(RFSIM_RADIO_SUBSTATE_STARTUP, RFSIM_RAMPUP_TIME_US);
+    }
+    if (state == OT_RADIO_STATE_SLEEP || state == OT_RADIO_STATE_DISABLED)
+    {
+        complete_tx(OT_ERROR_ABORT);
+        if (sample_pending)
+        {
+            set_sub_state(RFSIM_RADIO_SUBSTATE_READY, NSI_NEVER);
+            cancel_sample();
+        }
+        if (state == OT_RADIO_STATE_DISABLED)
+        {
+            set_sub_state(RFSIM_RADIO_SUBSTATE_STARTUP, RFSIM_STARTUP_TIME_US);
+        }
+    }
+    sleep_pending = false;
     radio_state   = state;
-    radio_channel = channel;
+    if (radio_sub_state == RFSIM_RADIO_SUBSTATE_READY || radio_sub_state == RFSIM_RADIO_SUBSTATE_STARTUP)
+    {
+        radio_channel = channel;
+    }
+    wake_pacer_now();
+}
+
+void nsi_otns_bottom_set_txpower(int8_t power)
+{
+    radio_power = power;
     wake_pacer_now();
 }
 
@@ -782,6 +1302,12 @@ void nsi_otns_bottom_send_ext_addr(const uint8_t *ext_addr_be)
 
     (void)write_event(OT_SIM_EVENT_EXT_ADDR, 0, ext_addr, OT_EXT_ADDRESS_SIZE);
     wake_pacer_now();
+}
+
+void nsi_otns_bottom_set_own_addr(const uint8_t *short_addr, const uint8_t *ext_addr_le)
+{
+    memcpy(own_short_addr, short_addr, SHORT_ADDR_SIZE);
+    memcpy(own_ext_addr, ext_addr_le, OT_EXT_ADDRESS_SIZE);
 }
 
 void nsi_otns_bottom_send_status(const char *status, uint16_t len)
