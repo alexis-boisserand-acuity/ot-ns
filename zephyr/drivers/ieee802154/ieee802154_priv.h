@@ -24,21 +24,6 @@
  * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
  * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
  * POSSIBILITY OF SUCH DAMAGE.
- *
- * Shared definitions for the OTNS (OpenThread Network Simulator) IEEE 802.15.4
- * driver. This header is included by BOTH:
- *
- *   - the embedded (Zephyr CPU) side  : ieee802154_otns.c
- *   - the runner  (host/native) side  : ieee802154_otns_bottom.c
- *
- * It must therefore only use standard C integer types and headers that are
- * valid in both compilation environments (plain C, or portable OpenThread
- * public API headers - no Zephyr- or host-specific ones).
- *
- * The two sides are linked together into a single native_simulator executable
- * and communicate through the plain C functions declared below. Data flowing
- * from the runner side towards the embedded side is signalled with a dedicated
- * interrupt (IEEE802154_OTNS_IRQ) and pulled by the embedded ISR.
  */
 
 #ifndef IEEE802154_OTNS_PRIV_H__

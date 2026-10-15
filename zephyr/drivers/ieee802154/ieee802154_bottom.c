@@ -314,7 +314,6 @@ static int write_event(uint8_t type, uint64_t delay, const uint8_t *data, uint16
 
 static void disconnect(void)
 {
-    disabled = true;
     complete_tx(OT_ERROR_ABORT);
     cancel_sample();
     if (fd >= 0)
