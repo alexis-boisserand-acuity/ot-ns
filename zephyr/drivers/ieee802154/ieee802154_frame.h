@@ -97,6 +97,7 @@
 #define AIFS_TURNAROUND_US ((uint32_t)OT_RADIO_AIFS_TIME_US)
 
 #define MAX_MAC_KEYS 3
+#define MAC_KEY_CURRENT 1
 #define MAC_KEY_SIZE 16
 
 struct mac_key_entry
@@ -134,6 +135,13 @@ struct frame_addr_info
     uint16_t src_pan;
 };
 
+struct ack_security_info
+{
+    bool     secured;
+    uint8_t  key_id;
+    uint32_t frame_counter;
+};
+
 uint16_t crc16(const uint8_t *data, size_t len);
 
 bool parse_frame(const uint8_t *psdu, uint16_t len, struct frame_addr_info *info);
@@ -156,7 +164,13 @@ int  fpb_ext_add(const uint8_t *addr);
 int  fpb_ext_remove(const uint8_t *addr);
 void fpb_ext_clear(void);
 
-void schedule_ack(const uint8_t *rx_psdu, uint16_t rx_len, int8_t rssi, const struct frame_addr_info *info);
+bool schedule_ack(const uint8_t                *rx_psdu,
+                  uint16_t                      rx_len,
+                  int8_t                        rssi,
+                  const struct frame_addr_info *info,
+                  struct ack_security_info     *security);
+
+int refresh_ack(uint8_t *psdu, uint16_t len);
 
 struct ieee802154_config;
 int configure_enh_ack_ie(const struct ieee802154_config *config);
@@ -167,6 +181,8 @@ void set_mac_keys(const struct ieee802154_key *keys);
 
 void set_frame_counter(uint32_t counter, bool only_if_larger);
 
-int encrypt_tx_frame(uint8_t *psdu, uint16_t len);
+struct net_pkt;
+
+int encrypt_tx_frame(uint8_t *psdu, uint16_t len, struct net_pkt *pkt);
 
 #endif /* IEEE802154_OTNS_FRAME_H__ */

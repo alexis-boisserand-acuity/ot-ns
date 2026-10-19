@@ -31,6 +31,7 @@
 
 #include <zephyr/irq.h>
 #include <zephyr/net/ieee802154_radio.h>
+#include <zephyr/net/net_pkt.h>
 #include <zephyr/sys/byteorder.h>
 
 #include <openthread/link.h>
@@ -50,10 +51,19 @@ LOG_MODULE_DECLARE(LOG_MODULE_NAME);
 #define SEC_CTRL_KEY_ID_MODE_SHIFT 3
 #define SEC_CTRL_KEY_ID_MODE_MASK 0x03
 #define SEC_LEVEL_ENC_BIT 0x04
+#define SEC_LEVEL_ENC_MIC32 0x05
+#define SEC_MIC32_SIZE 4
+#define KEY_ID_MODE_1 1
 #define SEC_CTRL_FIELD_SIZE 1
 #define FRAME_COUNTER_FIELD_SIZE 4
 #define CMD_FRAME_ID_SIZE 1
 #define CCM_NONCE_SIZE (OT_EXT_ADDRESS_SIZE + FRAME_COUNTER_FIELD_SIZE + SEC_CTRL_FIELD_SIZE)
+
+static int frame_ie_start(const struct frame_addr_info *info);
+static int aux_sec_header_len(uint8_t key_id_mode);
+
+static uint8_t  ack_rx_psdu[OT_RADIO_FRAME_MAX_SIZE];
+static uint16_t ack_rx_len;
 
 /* ------------------------------------------------------------------------- */
 /* Framing helpers (CRC)                                                     */
@@ -228,12 +238,12 @@ bool frame_pending_for(const uint8_t *psdu, uint16_t len, const struct frame_add
 /* Enhanced-ACK building (CSL phase, Thread Link-Metrics IEs)                */
 /* ------------------------------------------------------------------------- */
 
-static uint16_t csl_phase(void)
+static uint16_t csl_phase(uint32_t delay_us)
 {
     uint32_t period_us = data.csl_period * OT_US_PER_TEN_SYMBOLS;
     uint32_t phr_us    = OT_RADIO_SYMBOLS_PER_OCTET * OT_RADIO_SYMBOL_TIME;
     uint32_t anchor_us = (uint32_t)(data.csl_expected_rx_time_ns / NSEC_PER_USEC) + phr_us;
-    uint32_t tx_mhr_us = (uint32_t)otPlatTimeGet() + AIFS_TURNAROUND_US + OT_RADIO_SHR_PHR_DURATION_US;
+    uint32_t tx_mhr_us = (uint32_t)otPlatTimeGet() + delay_us + OT_RADIO_SHR_PHR_DURATION_US;
     uint32_t diff      = ((anchor_us % period_us) - (tx_mhr_us % period_us) + period_us) % period_us;
 
     if (diff % OT_US_PER_TEN_SYMBOLS > 0)
@@ -267,7 +277,7 @@ static bool ack_ie_matches_dst(const struct enh_ack_ie *ie, const uint8_t *psdu,
     return false;
 }
 
-static void fill_csl_ie_content(uint8_t *content) { sys_put_le16(csl_phase(), &content[0]); }
+static void fill_csl_ie_content(uint8_t *content) { sys_put_le16(csl_phase(AIFS_TURNAROUND_US), &content[0]); }
 
 static void fill_link_metrics_ie_content(uint8_t *content, uint8_t content_len, int8_t rssi)
 {
@@ -345,14 +355,17 @@ static int build_enh_ack(const uint8_t                *rx_psdu,
                          const struct frame_addr_info *info,
                          int8_t                        rssi,
                          uint8_t                      *ack,
-                         uint16_t                     *ack_len_out)
+                         uint16_t                     *ack_len_out,
+                         struct ack_security_info     *security)
 {
     uint16_t off = FCF_SIZE + SEQ_NUM_SIZE;
     uint16_t dst_pan;
+    int      sec_ctrl_off = 0;
+    int      mic_len      = 0;
 
     if (info->src_mode == ADDR_MODE_NONE || info->src_off == FRAME_OFF_NONE)
     {
-        return -1;
+        return -EINVAL;
     }
     if (info->src_pan_present)
     {
@@ -382,16 +395,51 @@ static int build_enh_ack(const uint8_t                *rx_psdu,
     memcpy(&ack[off], &rx_psdu[info->src_off], addr_len);
     off += addr_len;
 
-    uint16_t ie_len =
-        build_enh_ack_ies(rx_psdu, info, rssi, &ack[off], (uint16_t)(OT_RADIO_FRAME_MAX_SIZE - off - FCS_SIZE));
+    if (info->fcf & FCF_SECURITY_ENABLED_BIT)
+    {
+        int rx_sec_off = frame_ie_start(info);
+        int aux_len    = aux_sec_header_len(KEY_ID_MODE_1);
+
+        if (rx_sec_off + aux_len + SEC_MIC32_SIZE + FCS_SIZE > rx_len ||
+            rx_psdu[rx_sec_off] != (SEC_LEVEL_ENC_MIC32 | (KEY_ID_MODE_1 << SEC_CTRL_KEY_ID_MODE_SHIFT)))
+        {
+            return -EINVAL;
+        }
+
+        fcf |= FCF_SECURITY_ENABLED_BIT;
+        sec_ctrl_off = off;
+        ack[off++]   = rx_psdu[rx_sec_off];
+        memset(&ack[off], 0, FRAME_COUNTER_FIELD_SIZE);
+        off += FRAME_COUNTER_FIELD_SIZE;
+        ack[off++] = rx_psdu[rx_sec_off + aux_len - 1];
+        mic_len    = SEC_MIC32_SIZE;
+    }
+
+    uint16_t ie_len = build_enh_ack_ies(rx_psdu, info, rssi, &ack[off],
+                                        (uint16_t)(OT_RADIO_FRAME_MAX_SIZE - off - mic_len - FCS_SIZE));
 
     if (ie_len > 0)
     {
         fcf |= FCF_IE_PRESENT_BIT;
     }
     off += ie_len;
+    memset(&ack[off], 0, mic_len);
+    off += mic_len;
 
     sys_put_le16(fcf, &ack[0]);
+
+    int ret = encrypt_tx_frame(ack, off, NULL);
+
+    if (ret < 0)
+    {
+        return ret;
+    }
+    if (fcf & FCF_SECURITY_ENABLED_BIT)
+    {
+        security->secured       = true;
+        security->frame_counter = sys_get_le32(&ack[sec_ctrl_off + SEC_CTRL_FIELD_SIZE]);
+        security->key_id        = ack[sec_ctrl_off + aux_sec_header_len(KEY_ID_MODE_1) - 1];
+    }
 
     uint16_t fcs = crc16(ack, off);
 
@@ -401,16 +449,31 @@ static int build_enh_ack(const uint8_t                *rx_psdu,
     return 0;
 }
 
-void schedule_ack(const uint8_t *rx_psdu, uint16_t rx_len, int8_t rssi, const struct frame_addr_info *info)
+bool schedule_ack(const uint8_t                *rx_psdu,
+                  uint16_t                      rx_len,
+                  int8_t                        rssi,
+                  const struct frame_addr_info *info,
+                  struct ack_security_info     *security)
 {
     uint8_t  ack[OT_RADIO_FRAME_MAX_SIZE];
     uint16_t ack_len;
+    int      ret;
+
+    memset(security, 0, sizeof(*security));
+
+    if (rx_len > sizeof(ack_rx_psdu))
+    {
+        LOG_ERR("Cannot schedule ACK for oversized frame: %u", rx_len);
+        return false;
+    }
 
     if (info->version == IEEE802154_VERSION_2015)
     {
-        if (build_enh_ack(rx_psdu, rx_len, info, rssi, ack, &ack_len) < 0)
+        ret = build_enh_ack(rx_psdu, rx_len, info, rssi, ack, &ack_len, security);
+        if (ret < 0)
         {
-            return;
+            LOG_WRN("Failed to build enhanced ACK: %d", ret);
+            return false;
         }
     }
     else
@@ -430,10 +493,17 @@ void schedule_ack(const uint8_t *rx_psdu, uint16_t rx_len, int8_t rssi, const st
         ack_len                 = ACK_FRAME_SIZE;
     }
 
-    if (nsi_otns_bottom_tx_after(data.channel, data.txpower, ack, ack_len, AIFS_TURNAROUND_US) == 0)
+    ret = nsi_otns_bottom_tx_after(data.channel, data.txpower, ack, ack_len, AIFS_TURNAROUND_US);
+    if (ret != 0)
     {
-        data.ack_tx_pending = true;
+        memset(security, 0, sizeof(*security));
+        LOG_WRN("Failed to schedule ACK: %d", ret);
+        return false;
     }
+    memcpy(ack_rx_psdu, rx_psdu, rx_len);
+    ack_rx_len          = rx_len;
+    data.ack_tx_pending = true;
+    return true;
 }
 
 int configure_enh_ack_ie(const struct ieee802154_config *config)
@@ -540,6 +610,7 @@ int configure_enh_ack_ie(const struct ieee802154_config *config)
 
 void set_mac_keys(const struct ieee802154_key *keys)
 {
+    /* The OpenThread platform supplies previous, current, then next key. */
     for (int i = 0; i < MAX_MAC_KEYS; i++)
     {
         data.mac_keys[i].valid = false;
@@ -625,7 +696,12 @@ static int mic_len_for_level(uint8_t security_level)
     return mic_len[security_level & 0x03];
 }
 
-static void patch_tx_csl_ie(uint8_t *psdu, uint16_t len, int ie_start, int footer_len, bool ie_present)
+static void patch_tx_csl_ie(uint8_t *psdu,
+                            uint16_t len,
+                            int      ie_start,
+                            int      footer_len,
+                            bool     ie_present,
+                            uint32_t delay_us)
 {
     int off = ie_start;
 
@@ -648,7 +724,7 @@ static void patch_tx_csl_ie(uint8_t *psdu, uint16_t len, int ie_start, int foote
         {
             uint8_t *content = &psdu[off + HEADER_IE_HDR_SIZE];
 
-            sys_put_le16(csl_phase(), &content[0]);
+            sys_put_le16(csl_phase(delay_us), &content[0]);
             sys_put_le16((uint16_t)data.csl_period, &content[2]);
             return;
         }
@@ -749,10 +825,16 @@ static int aead_encrypt_frame(uint8_t       *psdu,
     return 0;
 }
 
-int encrypt_tx_frame(uint8_t *psdu, uint16_t len)
+int encrypt_tx_frame(uint8_t *psdu, uint16_t len, struct net_pkt *pkt)
 {
     struct frame_addr_info info;
-    int                    footer_len = 0;
+    int                    footer_len     = 0;
+    bool                   header_updated = pkt != NULL && net_pkt_ieee802154_mac_hdr_rdy(pkt);
+
+    if (pkt != NULL && net_pkt_ieee802154_frame_secured(pkt))
+    {
+        return 0;
+    }
 
     if (!parse_frame(psdu, len, &info))
     {
@@ -767,7 +849,10 @@ int encrypt_tx_frame(uint8_t *psdu, uint16_t len)
 
     if (!secured)
     {
-        patch_tx_csl_ie(psdu, len, ie_start, footer_len, ie_present);
+        if (!header_updated)
+        {
+            patch_tx_csl_ie(psdu, len, ie_start, footer_len, ie_present, AIFS_TURNAROUND_US);
+        }
         return 0;
     }
 
@@ -797,16 +882,31 @@ int encrypt_tx_frame(uint8_t *psdu, uint16_t len)
         return -EINVAL;
     }
 
-    uint8_t        key_id = (key_id_mode != 0) ? psdu[ie_start - 1] : 0;
-    const uint8_t *key    = find_mac_key(key_id_mode, key_id);
+    uint8_t        key_id = psdu[ie_start - 1];
+    uint8_t        key[MAC_KEY_SIZE];
+    bool           is_ack = (fcf & FCF_FRAME_TYPE_MASK) == FCF_FRAME_TYPE_ACK;
+    unsigned int   lock   = irq_lock();
+    const uint8_t *mac_key;
 
-    if (key == NULL)
+    if (!is_ack && !header_updated)
     {
+        key_id = data.mac_keys[MAC_KEY_CURRENT].valid ? data.mac_keys[MAC_KEY_CURRENT].key_id : 0;
+    }
+    mac_key = key_id != 0 ? find_mac_key(key_id_mode, key_id) : NULL;
+
+    if (mac_key == NULL)
+    {
+        irq_unlock(lock);
         LOG_ERR("encrypt_tx_frame: no MAC key for key_id_mode=%u key_id=%u", key_id_mode, key_id);
         return -ENOENT;
     }
+    memcpy(key, mac_key, sizeof(key));
+    irq_unlock(lock);
 
-    patch_tx_csl_ie(psdu, len, ie_start, footer_len, ie_present);
+    if (!header_updated)
+    {
+        patch_tx_csl_ie(psdu, len, ie_start, footer_len, ie_present, AIFS_TURNAROUND_US);
+    }
 
     int header_len = frame_header_len(psdu, len, ie_start, footer_len, ie_present, fcf, info.version);
 
@@ -817,10 +917,96 @@ int encrypt_tx_frame(uint8_t *psdu, uint16_t len)
         return -EINVAL;
     }
 
-    int      payload_len   = len - header_len - footer_len;
-    uint32_t frame_counter = data.mac_frame_counter++;
+    int      payload_len = len - header_len - footer_len;
+    uint32_t frame_counter;
 
-    sys_put_le32(frame_counter, &psdu[sec_ctrl_off + SEC_CTRL_FIELD_SIZE]);
+    if (!header_updated)
+    {
+        lock          = irq_lock();
+        frame_counter = data.mac_frame_counter++;
+        irq_unlock(lock);
+        sys_put_le32(frame_counter, &psdu[sec_ctrl_off + SEC_CTRL_FIELD_SIZE]);
+        psdu[ie_start - 1] = key_id;
+    }
+    else
+    {
+        frame_counter = sys_get_le32(&psdu[sec_ctrl_off + SEC_CTRL_FIELD_SIZE]);
+    }
 
-    return aead_encrypt_frame(psdu, header_len, payload_len, security_level, mic_len, frame_counter, key);
+    int ret = aead_encrypt_frame(psdu, header_len, payload_len, security_level, mic_len, frame_counter, key);
+
+    if (ret == 0 && pkt != NULL)
+    {
+        net_pkt_set_ieee802154_mac_hdr_rdy(pkt, true);
+        net_pkt_set_ieee802154_frame_secured(pkt, true);
+    }
+    return ret;
+}
+
+int refresh_ack(uint8_t *psdu, uint16_t len)
+{
+    struct frame_addr_info rx_info;
+    struct frame_addr_info ack_info;
+    int                    mic_len = 0;
+
+    if (!parse_frame(ack_rx_psdu, ack_rx_len, &rx_info) || !parse_frame(psdu, len, &ack_info) ||
+        !frame_is_ack(psdu, len) || len < ACK_FRAME_SIZE)
+    {
+        LOG_ERR("Cannot refresh invalid ACK");
+        return -EINVAL;
+    }
+
+    int  ie_start   = frame_ie_start(&ack_info);
+    bool secured    = (ack_info.fcf & FCF_SECURITY_ENABLED_BIT) != 0;
+    bool ie_present = (ack_info.fcf & FCF_IE_PRESENT_BIT) != 0;
+
+    if (secured)
+    {
+        if (ie_start + aux_sec_header_len(KEY_ID_MODE_1) + SEC_MIC32_SIZE + FCS_SIZE > len ||
+            psdu[ie_start] != (SEC_LEVEL_ENC_MIC32 | (KEY_ID_MODE_1 << SEC_CTRL_KEY_ID_MODE_SHIFT)))
+        {
+            LOG_ERR("Cannot refresh ACK with invalid security header");
+            return -EINVAL;
+        }
+        ie_start += aux_sec_header_len(KEY_ID_MODE_1);
+        mic_len = SEC_MIC32_SIZE;
+    }
+
+    int header_len =
+        frame_header_len(psdu, len - FCS_SIZE, ie_start, mic_len, ie_present, ack_info.fcf, ack_info.version);
+
+    if (header_len < 0 || header_len + mic_len + FCS_SIZE != len)
+    {
+        LOG_ERR("Cannot refresh ACK with invalid header or nonempty payload");
+        return -EINVAL;
+    }
+
+    uint16_t fcf = ack_info.fcf & ~FCF_FRAME_PENDING_BIT;
+
+    if (frame_pending_for(ack_rx_psdu, ack_rx_len, &rx_info))
+    {
+        fcf |= FCF_FRAME_PENDING_BIT;
+    }
+    sys_put_le16(fcf, psdu);
+    patch_tx_csl_ie(psdu, len - FCS_SIZE, ie_start, mic_len, ie_present, 0);
+
+    if (secured)
+    {
+        struct net_pkt pkt = {0};
+
+        /* This ACK has no encrypted payload and has not been sent yet. Keep
+         * its reserved counter (already reported to OpenThread), but replace
+         * the MIC after updating authenticated header fields.
+         */
+        net_pkt_set_ieee802154_mac_hdr_rdy(&pkt, true);
+        int ret = encrypt_tx_frame(psdu, len - FCS_SIZE, &pkt);
+
+        if (ret < 0)
+        {
+            return ret;
+        }
+    }
+
+    sys_put_le16(crc16(psdu, len - FCS_SIZE), &psdu[len - FCS_SIZE]);
+    return 0;
 }

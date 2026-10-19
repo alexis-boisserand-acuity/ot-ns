@@ -508,6 +508,7 @@ static void handle_rx_done_event(const struct otns_radio_event *ev)
     if (radio_sub_state == RFSIM_RADIO_SUBSTATE_RX_FRAME_ONGOING && ev->data.mError == OT_ERROR_NONE &&
         is_ack_requested && !is_ack && is_addr_match)
     {
+        ack_psdu_len = 0;
         set_sub_state(RFSIM_RADIO_SUBSTATE_RX_AIFS_WAIT, OT_RADIO_AIFS_TIME_US);
     }
     else if (radio_sub_state == RFSIM_RADIO_SUBSTATE_RX_FRAME_ONGOING)
@@ -1118,12 +1119,22 @@ static void radio_timer_fired(void)
         break;
 
     case RFSIM_RADIO_SUBSTATE_RX_AIFS_WAIT:
-        if (send_frame(ack_channel, ack_power, ack_psdu, ack_psdu_len, true) == 0)
+        result.type     = OTNS_RADIO_PREPARE_ACK;
+        result.psdu_len = ack_psdu_len;
+        memcpy(result.psdu, ack_psdu, ack_psdu_len);
+        ack_psdu_len = 0;
+        if (result.psdu_len != 0)
+        {
+            raise_embedded(&result);
+        }
+        if (ack_psdu_len != 0 && send_frame(ack_channel, ack_power, ack_psdu, ack_psdu_len, true) == 0)
         {
             break;
         }
+        nsi_print_warning("ieee802154_otns: failed to prepare or transmit ACK\n");
         set_sub_state(RFSIM_RADIO_SUBSTATE_RX_TX_TO_RX, RFSIM_TURNAROUND_TIME_US);
-        result.type = OT_SIM_EVENT_RADIO_TX_DONE;
+        result.type        = OT_SIM_EVENT_RADIO_TX_DONE;
+        result.data.mError = OT_ERROR_ABORT;
         raise_embedded(&result);
         break;
 
@@ -1191,6 +1202,17 @@ int nsi_otns_bottom_tx_after(uint8_t channel, int8_t power, const uint8_t *psdu,
     memcpy(ack_psdu, psdu, len);
     ack_psdu_len = len;
     set_sub_state(RFSIM_RADIO_SUBSTATE_RX_AIFS_WAIT, delay_us);
+    return 0;
+}
+
+int nsi_otns_bottom_update_ack(const uint8_t *psdu, uint16_t len)
+{
+    if (radio_sub_state != RFSIM_RADIO_SUBSTATE_RX_AIFS_WAIT || len < ACK_FRAME_SIZE || len > OT_RADIO_FRAME_MAX_SIZE)
+    {
+        return -EINVAL;
+    }
+    memcpy(ack_psdu, psdu, len);
+    ack_psdu_len = len;
     return 0;
 }
 

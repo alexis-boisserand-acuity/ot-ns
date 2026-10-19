@@ -56,7 +56,7 @@ LOG_MODULE_DECLARE(LOG_MODULE_NAME);
 /* RX frame delivery to the net stack                                        */
 /* ------------------------------------------------------------------------- */
 
-static void deliver_rx(const struct otns_radio_event *ev, bool acked_with_fpb)
+static void deliver_rx(const struct otns_radio_event *ev, bool acked_with_fpb, const struct ack_security_info *security)
 {
     if (ev->psdu_len < FCS_SIZE)
     {
@@ -90,6 +90,11 @@ static void deliver_rx(const struct otns_radio_event *ev, bool acked_with_fpb)
     net_pkt_set_ieee802154_lqi(pkt, LQI_PERFECT);
     net_pkt_set_ieee802154_rssi_dbm(pkt, ev->data.mPower);
     net_pkt_set_ieee802154_ack_fpb(pkt, acked_with_fpb);
+#if defined(CONFIG_NET_L2_OPENTHREAD)
+    net_pkt_set_ieee802154_ack_seb(pkt, security != NULL && security->secured);
+    net_pkt_set_ieee802154_ack_keyid(pkt, security != NULL ? security->key_id : 0);
+    net_pkt_set_ieee802154_ack_fc(pkt, security != NULL ? security->frame_counter : 0);
+#endif
     net_pkt_set_timestamp_ns(pkt, ev->timestamp_us * NSEC_PER_USEC);
 
     if (net_recv_data(data.iface, pkt) < 0)
@@ -128,14 +133,15 @@ static void handle_rx_done(const struct otns_radio_event *ev)
 
     if (for_me && (info.fcf & FCF_ACK_REQ_BIT))
     {
-        bool fpb = frame_pending_for(ev->psdu, ev->psdu_len, &info);
+        struct ack_security_info security;
+        bool                     scheduled = schedule_ack(ev->psdu, ev->psdu_len, ev->data.mPower, &info, &security);
+        bool                     fpb       = scheduled && frame_pending_for(ev->psdu, ev->psdu_len, &info);
 
-        deliver_rx(ev, fpb);
-        schedule_ack(ev->psdu, ev->psdu_len, ev->data.mPower, &info);
+        deliver_rx(ev, fpb, scheduled ? &security : NULL);
     }
     else
     {
-        deliver_rx(ev, false);
+        deliver_rx(ev, false, NULL);
     }
 }
 
@@ -232,6 +238,21 @@ void isr(const void *arg)
         case OT_SIM_EVENT_RADIO_CHAN_SAMPLE:
             handle_chan_sample(&ev);
             break;
+
+        case OTNS_RADIO_PREPARE_ACK:
+        {
+            int ret = refresh_ack(ev.psdu, ev.psdu_len);
+
+            if (ret == 0)
+            {
+                ret = nsi_otns_bottom_update_ack(ev.psdu, ev.psdu_len);
+            }
+            if (ret < 0)
+            {
+                LOG_ERR("Failed to refresh ACK: %d", ret);
+            }
+            break;
+        }
 
         default:
             break;

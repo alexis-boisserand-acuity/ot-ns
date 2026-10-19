@@ -42,6 +42,8 @@ extern "C" {
 #define IEEE802154_OTNS_ALARM_MILLI_IRQ 6
 #define IEEE802154_OTNS_ALARM_MICRO_IRQ 7
 
+#define OTNS_RADIO_PREPARE_ACK 0xff
+
 struct otns_radio_event
 {
     uint8_t                   type;
@@ -60,6 +62,8 @@ bool nsi_otns_bottom_is_configured(void);
 int nsi_otns_bottom_tx(uint8_t channel, int8_t power, const uint8_t *psdu, uint16_t len, bool cca);
 
 int nsi_otns_bottom_tx_after(uint8_t channel, int8_t power, const uint8_t *psdu, uint16_t len, uint32_t delay_us);
+
+int nsi_otns_bottom_update_ack(const uint8_t *psdu, uint16_t len);
 
 int nsi_otns_bottom_cca(uint8_t channel);
 

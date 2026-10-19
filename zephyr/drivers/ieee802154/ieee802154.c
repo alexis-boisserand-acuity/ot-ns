@@ -289,13 +289,17 @@ static int tx_check_preconditions(enum ieee802154_tx_mode mode, uint16_t len)
     return 0;
 }
 
-static int tx_build_psdu(struct net_buf *frag, uint16_t len, uint8_t *psdu)
+static int tx_build_psdu(struct net_pkt *pkt, struct net_buf *frag, uint16_t len, uint8_t *psdu)
 {
     memcpy(psdu, frag->data, len);
-    if (encrypt_tx_frame(psdu, len) < 0)
+    int rc = encrypt_tx_frame(psdu, len, pkt);
+
+    if (rc < 0)
     {
         return -EIO;
     }
+
+    memcpy(frag->data, psdu, len);
 
     uint16_t fcs = crc16(psdu, len);
 
@@ -373,8 +377,6 @@ static int tx(const struct device *dev, enum ieee802154_tx_mode mode, struct net
     int      rc;
     uint16_t len = frag->len;
 
-    ARG_UNUSED(pkt);
-
     rc = tx_check_preconditions(mode, len);
     if (rc != 0)
     {
@@ -383,7 +385,7 @@ static int tx(const struct device *dev, enum ieee802154_tx_mode mode, struct net
 
     uint8_t psdu[OT_RADIO_FRAME_MAX_SIZE];
 
-    rc = tx_build_psdu(frag, len, psdu);
+    rc = tx_build_psdu(pkt, frag, len, psdu);
     if (rc != 0)
     {
         return rc;
