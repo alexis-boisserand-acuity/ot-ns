@@ -614,21 +614,10 @@ void otPlatOtnsStatus(const char *aStatus)
     nsi_otns_bottom_send_status(aStatus, (uint16_t)strlen(aStatus));
 }
 
-#if defined(CONFIG_NET_L2_IEEE802154)
-#define RADIO_L2 IEEE802154_L2
-#define RADIO_L2_CTX_TYPE NET_L2_GET_CTX_TYPE(IEEE802154_L2)
-#define RADIO_MTU IEEE802154_MTU
-#elif defined(CONFIG_NET_L2_OPENTHREAD)
 #define RADIO_L2 OPENTHREAD_L2
 #define RADIO_L2_CTX_TYPE NET_L2_GET_CTX_TYPE(OPENTHREAD_L2)
 #define RADIO_MTU OPENTHREAD_MTU
-#elif defined(CONFIG_NET_L2_CUSTOM_IEEE802154)
-#define RADIO_L2 CUSTOM_IEEE802154_L2
-#define RADIO_L2_CTX_TYPE NET_L2_GET_CTX_TYPE(CUSTOM_IEEE802154_L2)
-#define RADIO_MTU CONFIG_NET_L2_CUSTOM_IEEE802154_MTU
-#endif
 
-#if defined(CONFIG_NET_L2_PHY_IEEE802154)
 NET_DEVICE_DT_INST_DEFINE(0,
                           init,
                           NULL,
@@ -639,4 +628,3 @@ NET_DEVICE_DT_INST_DEFINE(0,
                           RADIO_L2,
                           RADIO_L2_CTX_TYPE,
                           RADIO_MTU);
-#endif

@@ -10,6 +10,15 @@ if(CONFIG_IEEE802154_OTNS)
   zephyr_library_sources(${otns_drv_dir}/ieee802154_frame_parse.c)
   zephyr_library_sources(${otns_drv_dir}/ieee802154_isr.c)
   zephyr_library_sources(${otns_drv_dir}/alarm_isr.c)
+  zephyr_library_sources(${otns_drv_dir}/cli.c)
+  zephyr_library_sources(${otns_drv_dir}/platform_wrap.c)
+  zephyr_library_sources_ifdef(CONFIG_OPENTHREAD_BORDER_ROUTING ${otns_drv_dir}/infra_if.c)
+
+  zephyr_ld_options(
+    -Wl,--wrap=otPlatRadioGetCcaEnergyDetectThreshold
+    -Wl,--wrap=otPlatRadioSetCcaEnergyDetectThreshold
+  )
+
   zephyr_include_directories(${otns_drv_dir})
   zephyr_include_directories(${CMAKE_CURRENT_SOURCE_DIR}/..)
   zephyr_include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../ot-rfsim/src)
@@ -23,10 +32,6 @@ if(CONFIG_IEEE802154_OTNS)
   target_sources(native_simulator INTERFACE ${otns_drv_dir}/ieee802154_bottom.c)
   target_sources(native_simulator INTERFACE ${otns_drv_dir}/ieee802154_frame_parse.c)
   target_sources(native_simulator INTERFACE ${otns_drv_dir}/alarm_isr_bottom.c)
-
-  if(CONFIG_IEEE802154_OTNS_CLI)
-    zephyr_library_sources(${otns_drv_dir}/cli.c)
-    target_sources(native_simulator INTERFACE ${otns_drv_dir}/cli_bottom.c)
-  endif()
+  target_sources(native_simulator INTERFACE ${otns_drv_dir}/cli_bottom.c)
 
 endif()

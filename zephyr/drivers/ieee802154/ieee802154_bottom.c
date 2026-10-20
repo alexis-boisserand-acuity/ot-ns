@@ -132,6 +132,7 @@ static uint8_t own_short_addr[SHORT_ADDR_SIZE];
 static uint8_t own_ext_addr[OT_EXT_ADDRESS_SIZE];
 
 static int8_t   s_rx_sensitivity  = RFSIM_RX_SENSITIVITY_DEFAULT_DBM;
+static int8_t   s_cca_threshold   = RFSIM_CCA_ED_THRESHOLD_DEFAULT_DBM;
 static uint64_t s_phy_bitrate     = PHY_BITRATE_DEFAULT;
 static int16_t  s_clock_drift_ppm = 0;
 static uint8_t  s_csl_accuracy    = RFSIM_CSL_ACCURACY_DEFAULT_PPM;
@@ -557,8 +558,8 @@ static void handle_chan_sample_event(const struct otns_radio_event *ev)
     }
     else if (radio_sub_state == RFSIM_RADIO_SUBSTATE_TX_CCA)
     {
-        bool clear = ev->data.mError == OT_ERROR_NONE && (ev->data.mPower == (int8_t)OT_RADIO_RSSI_INVALID ||
-                                                          ev->data.mPower < RFSIM_CCA_ED_THRESHOLD_DEFAULT_DBM);
+        bool clear = ev->data.mError == OT_ERROR_NONE &&
+                     (ev->data.mPower == (int8_t)OT_RADIO_RSSI_INVALID || ev->data.mPower < s_cca_threshold);
 
         if (clear)
         {
@@ -668,6 +669,9 @@ static void handle_rfsim_param_event(uint8_t event_type, const uint8_t *data, ui
         case RFSIM_PARAM_RX_SENSITIVITY:
             s_rx_sensitivity = (int8_t)value;
             break;
+        case RFSIM_PARAM_CCA_THRESHOLD:
+            nsi_otns_bottom_set_cca_threshold((int8_t)value);
+            break;
         case RFSIM_PARAM_PHY_BITRATE:
             s_phy_bitrate = (value < 1) ? 1 : (uint64_t)value;
             break;
@@ -690,6 +694,9 @@ static void handle_rfsim_param_event(uint8_t event_type, const uint8_t *data, ui
     {
     case RFSIM_PARAM_RX_SENSITIVITY:
         value = (int32_t)s_rx_sensitivity;
+        break;
+    case RFSIM_PARAM_CCA_THRESHOLD:
+        value = (int32_t)nsi_otns_bottom_get_cca_threshold();
         break;
     case RFSIM_PARAM_PHY_BITRATE:
         value = (int32_t)s_phy_bitrate;
@@ -1294,6 +1301,10 @@ void nsi_otns_bottom_set_txpower(int8_t power)
     radio_power = power;
     wake_pacer_now();
 }
+
+int8_t nsi_otns_bottom_get_cca_threshold(void) { return s_cca_threshold; }
+
+void nsi_otns_bottom_set_cca_threshold(int8_t threshold) { s_cca_threshold = threshold; }
 
 void nsi_otns_bottom_send_uart(const uint8_t *buf, uint16_t len)
 {

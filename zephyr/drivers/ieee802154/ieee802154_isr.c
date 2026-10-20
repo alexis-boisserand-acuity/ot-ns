@@ -211,7 +211,7 @@ static void handle_chan_sample(const struct otns_radio_event *ev)
         return;
     }
     data.cca_channel_free = ev->data.mError == OT_ERROR_NONE && (ev->data.mPower == (int8_t)OT_RADIO_RSSI_INVALID ||
-                                                                 ev->data.mPower < RFSIM_CCA_ED_THRESHOLD_DEFAULT_DBM);
+                                                                 ev->data.mPower < nsi_otns_bottom_get_cca_threshold());
     k_sem_give(&data.cca_wait);
 }
 

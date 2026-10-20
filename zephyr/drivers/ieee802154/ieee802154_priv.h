@@ -73,6 +73,10 @@ void nsi_otns_bottom_set_state(uint8_t state, uint8_t channel);
 
 void nsi_otns_bottom_set_txpower(int8_t power);
 
+int8_t nsi_otns_bottom_get_cca_threshold(void);
+
+void nsi_otns_bottom_set_cca_threshold(int8_t threshold);
+
 void nsi_otns_bottom_send_uart(const uint8_t *buf, uint16_t len);
 
 void nsi_otns_bottom_send_ext_addr(const uint8_t *ext_addr_be);
