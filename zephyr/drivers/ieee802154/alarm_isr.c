@@ -27,8 +27,8 @@
  *
  * Embedded ("top") side of the ISR-driven OpenThread alarm variant.
  *
- * Replaces Zephyr's stock k_timer-based alarm_milli.c/alarm_micro.c
- * (see CONFIG_OPENTHREAD_PLATFORM_ALARM_ISR) with deadlines scheduled on the
+ * Overrides Zephyr's stock k_timer-based alarm_milli.c/alarm_micro.c (via
+ * -Wl,--wrap, see CMakeLists.txt) with deadlines scheduled on the
  * native simulator's hardware-event scheduler via alarm_isr_bottom.c, fired
  * through two dedicated interrupts instead of a k_timer expiry callback. This
  * decouples alarm precision from Zephyr's system tick
@@ -45,7 +45,6 @@
 #include <openthread/platform/alarm-milli.h>
 #include <openthread/platform/diag.h>
 #include <openthread/platform/radio.h>
-#include <openthread/platform/time.h>
 
 #include "ieee802154_priv.h"
 
@@ -70,18 +69,34 @@ static void alarm_micro_isr(const void *arg)
     otSysEventSignalPending();
 }
 
-void alarm_milli_set_time_offset_ms(int32_t offset_ms) { time_offset_ms = offset_ms; }
+static uint32_t alarm_milli_get_now(void) { return (uint32_t)(nsi_otns_bottom_get_time_us() / 1000) - time_offset_ms; }
 
-uint32_t otPlatAlarmMilliGetNow(void) { return (uint32_t)(nsi_otns_bottom_get_time_us() / 1000) - time_offset_ms; }
+static uint32_t alarm_micro_get_now(void) { return (uint32_t)nsi_otns_bottom_get_time_us() - time_offset_us; }
 
-uint32_t otPlatAlarmMicroGetNow(void) { return (uint32_t)nsi_otns_bottom_get_time_us() - time_offset_us; }
+uint32_t __wrap_otPlatAlarmMilliGetNow(void);
+uint32_t __wrap_otPlatAlarmMicroGetNow(void);
+void     __wrap_platformAlarmMilliInit(void);
+void     __wrap_platformAlarmMicroInit(void);
+void     __wrap_platformAlarmMilliProcess(otInstance *aInstance);
+void     __wrap_platformAlarmMicroProcess(otInstance *aInstance);
+void     __wrap_otPlatAlarmMilliStartAt(otInstance *aInstance, uint32_t aT0, uint32_t aDt);
+void     __wrap_otPlatAlarmMilliStop(otInstance *aInstance);
+void     __wrap_otPlatAlarmMicroStartAt(otInstance *aInstance, uint32_t aT0, uint32_t aDt);
+void     __wrap_otPlatAlarmMicroStop(otInstance *aInstance);
+void     __wrap_alarm_milli_set_time_offset_ms(int32_t offset_ms);
 
-void platformAlarmMilliInit(void)
+void __wrap_alarm_milli_set_time_offset_ms(int32_t offset_ms) { time_offset_ms = offset_ms; }
+
+uint32_t __wrap_otPlatAlarmMilliGetNow(void) { return alarm_milli_get_now(); }
+
+uint32_t __wrap_otPlatAlarmMicroGetNow(void) { return alarm_micro_get_now(); }
+
+void __wrap_platformAlarmMilliInit(void)
 {
-    /* IRQs for both alarms are installed once, from platformAlarmMicroInit() below. */
+    /* IRQs for both alarms are installed once, from __wrap_platformAlarmMicroInit() below. */
 }
 
-void platformAlarmMicroInit(void)
+void __wrap_platformAlarmMicroInit(void)
 {
     static bool irqs_installed;
 
@@ -95,12 +110,12 @@ void platformAlarmMicroInit(void)
     }
 
 #if defined(CONFIG_OPENTHREAD_PLATFORM_PKT_TXTIME)
-    time_offset_us = (int32_t)((int64_t)otPlatAlarmMicroGetNow() - (uint32_t)otPlatRadioGetNow(NULL));
-    alarm_milli_set_time_offset_ms(time_offset_us / 1000);
+    time_offset_us = (int32_t)((int64_t)alarm_micro_get_now() - (uint32_t)otPlatRadioGetNow(NULL));
+    __wrap_alarm_milli_set_time_offset_ms(time_offset_us / 1000);
 #endif
 }
 
-void platformAlarmMilliProcess(otInstance *aInstance)
+void __wrap_platformAlarmMilliProcess(otInstance *aInstance)
 {
     if (milli_fired)
     {
@@ -120,7 +135,7 @@ void platformAlarmMilliProcess(otInstance *aInstance)
     }
 }
 
-void platformAlarmMicroProcess(otInstance *aInstance)
+void __wrap_platformAlarmMicroProcess(otInstance *aInstance)
 {
     /* OPENTHREAD_CONFIG_PLATFORM_USEC_TIMER_ENABLE isn't visible here (it comes from
      * OPENTHREAD_PROJECT_CORE_CONFIG_FILE, only applied within modules/openthread/); use the
@@ -137,11 +152,11 @@ void platformAlarmMicroProcess(otInstance *aInstance)
 #endif
 }
 
-void otPlatAlarmMilliStartAt(otInstance *aInstance, uint32_t aT0, uint32_t aDt)
+void __wrap_otPlatAlarmMilliStartAt(otInstance *aInstance, uint32_t aT0, uint32_t aDt)
 {
     ARG_UNUSED(aInstance);
 
-    int32_t delta = (int32_t)(aT0 + aDt - otPlatAlarmMilliGetNow());
+    int32_t delta = (int32_t)(aT0 + aDt - alarm_milli_get_now());
 
     if (delta > 0)
     {
@@ -154,18 +169,18 @@ void otPlatAlarmMilliStartAt(otInstance *aInstance, uint32_t aT0, uint32_t aDt)
     }
 }
 
-void otPlatAlarmMilliStop(otInstance *aInstance)
+void __wrap_otPlatAlarmMilliStop(otInstance *aInstance)
 {
     ARG_UNUSED(aInstance);
 
     nsi_otns_bottom_alarm_cancel_milli();
 }
 
-void otPlatAlarmMicroStartAt(otInstance *aInstance, uint32_t aT0, uint32_t aDt)
+void __wrap_otPlatAlarmMicroStartAt(otInstance *aInstance, uint32_t aT0, uint32_t aDt)
 {
     ARG_UNUSED(aInstance);
 
-    int32_t delta = (int32_t)(aT0 + aDt - otPlatAlarmMicroGetNow());
+    int32_t delta = (int32_t)(aT0 + aDt - alarm_micro_get_now());
 
     if (delta > 0)
     {
@@ -178,11 +193,9 @@ void otPlatAlarmMicroStartAt(otInstance *aInstance, uint32_t aT0, uint32_t aDt)
     }
 }
 
-void otPlatAlarmMicroStop(otInstance *aInstance)
+void __wrap_otPlatAlarmMicroStop(otInstance *aInstance)
 {
     ARG_UNUSED(aInstance);
 
     nsi_otns_bottom_alarm_cancel_micro();
 }
-
-uint16_t otPlatTimeGetXtalAccuracy(void) { return otPlatRadioGetCslAccuracy(NULL); }
