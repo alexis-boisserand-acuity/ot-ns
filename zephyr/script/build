@@ -52,6 +52,7 @@ build()
     local app="${ZEPHYR_APP:-apps/cli}"
     local device_type="${OT_DEVICE_TYPE:?OT_DEVICE_TYPE must be set to 'ftd' or 'mtd'}"
     local thread_version="${OT_THREAD_VERSION:?OT_THREAD_VERSION must be set, e.g. '1_4'}"
+    local modules="${OTNS_ROOT};${OTNS_ROOT}/openthread"
     local device_options=()
 
     case "${device_type}" in
@@ -69,7 +70,7 @@ build()
     device_options+=("-DCONFIG_OPENTHREAD_THREAD_VERSION_${thread_version}=y")
 
     west build -b native_sim "${ZEPHYR_SRCDIR}/${app}" -d "${builddir}" -p always -- \
-        -DEXTRA_ZEPHYR_MODULES="${OTNS_ROOT}" "${COMMON_OPTIONS[@]}" "${device_options[@]}" "$@"
+        -DEXTRA_ZEPHYR_MODULES="${modules}" "${COMMON_OPTIONS[@]}" "${device_options[@]}" "$@"
 }
 
 main()

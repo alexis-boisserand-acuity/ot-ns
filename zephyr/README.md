@@ -4,7 +4,7 @@ This directory contains a Zephyr module providing an IEEE 802.15.4 driver for si
 
 ## Prerequisites
 
-This module requires a [Zephyr](https://github.com/zephyrproject-rtos/zephyr) installation (only v4.4.2 has been tested at the moment) with the openthread module enabled, which by default is pulled in by the regular Zephyr/`west` workspace setup.
+This module requires a [Zephyr](https://github.com/zephyrproject-rtos/zephyr) workspace and SDK.
 
 ## Zephyr-based equivalents of ot-rfsim executables
 

@@ -1,0 +1,112 @@
+# Copyright (c) 2026, The OTNS Authors.
+# All rights reserved.
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions are met:
+# 1. Redistributions of source code must retain the above copyright
+#    notice, this list of conditions and the following disclaimer.
+# 2. Redistributions in binary form must reproduce the above copyright
+#    notice, this list of conditions and the following disclaimer in the
+#    documentation and/or other materials provided with the distribution.
+# 3. Neither the name of the copyright holder nor the
+#    names of its contributors may be used to endorse or promote products
+#    derived from this software without specific prior written permission.
+#
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+# AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+# ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+# LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+# CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+# SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+# INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+# CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+# ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+# POSSIBILITY OF SUCH DAMAGE.
+
+name: Zephyr
+
+on:
+  push:
+    branches:
+      - 'main'
+  pull_request:
+    branches:
+      - 'main'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || (github.repository == 'openthread/ot-ns' && github.run_id) || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-zephyr-nodes:
+    name: Build Zephyr nodes (native_sim)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    container:
+      image: ghcr.io/zephyrproject-rtos/ci:v0.29.4
+    env:
+      # native_sim only needs the host compiler, not the Zephyr SDK toolchains.
+      ZEPHYR_TOOLCHAIN_VARIANT: host
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: recursive
+
+      - name: Set up minimal Zephyr workspace
+        env:
+          ZEPHYR_WORKSPACE: ${{ runner.temp }}/zephyr-workspace
+        run: |
+          ./zephyr/script/setup_zephyr_workspace "${ZEPHYR_WORKSPACE}"
+          echo "ZEPHYR_BASE=${ZEPHYR_WORKSPACE}/zephyr" >> "${GITHUB_ENV}"
+          echo "${ZEPHYR_WORKSPACE}/.venv/bin" >> "${GITHUB_PATH}"
+
+      - name: Build all node versions
+        working-directory: zephyr
+        run: ./script/build_all
+
+      - name: Build example apps
+        working-directory: zephyr
+        run: ./script/build_examples
+
+      - name: Package nodes
+        run: tar czf zephyr-nodes.tar.gz zephyr/ot-versions zephyr/build/*/zephyr/zephyr.exe
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: zephyr-nodes
+          path: zephyr-nodes.tar.gz
+          retention-days: 3
+
+  py-unittests:
+    name: Unittests with Zephyr nodes
+    needs: build-zephyr-nodes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.23'
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.10'
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: zephyr-nodes
+
+      - name: Install Zephyr nodes
+        run: |
+          # native_sim executables are 32-bit by default.
+          sudo apt-get update
+          sudo apt-get install -y libc6-i386
+          tar xzf zephyr-nodes.tar.gz
+
+      - name: Run unit tests with Zephyr nodes
+        env:
+          OTNS_NODES_DIR: ${{ github.workspace }}/zephyr/ot-versions
+        run: ./script/test py-unittests
