@@ -21,6 +21,16 @@ config IEEE802154_OTNS
 
 if IEEE802154_OTNS
 
+config IEEE802154_OTNS_CLI_LEGACY_CSL_PERIOD
+	bool "Legacy 'csl period' CLI unit (10 symbols) in the OTNS CLI bridge"
+	help
+	  OpenThread versions up to Thread 1.3 take the 'csl period' CLI
+	  argument in units of 10 symbols (160 us), while current OpenThread
+	  takes it in microseconds. OTNS sends the legacy unit to nodes it
+	  considers to be v12/v13. Enable this for Zephyr builds that emulate
+	  those versions on top of current OpenThread code: the CLI bridge then
+	  converts the 'csl period' argument to microseconds.
+
 module = IEEE802154_OTNS
 module-str = ieee802154 OTNS
 source "subsys/logging/Kconfig.template.log_config"

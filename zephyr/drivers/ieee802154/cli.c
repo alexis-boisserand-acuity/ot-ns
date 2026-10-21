@@ -43,6 +43,7 @@ LOG_MODULE_REGISTER(LOG_MODULE_NAME, LOG_LEVEL_INF);
 #include <openthread.h>
 #include <openthread/cli.h>
 #include <openthread/instance.h>
+#include <openthread/link.h>
 
 #include <nsi_main.h>
 
@@ -132,6 +133,28 @@ static void isr(const void *arg)
     }
 }
 
+#ifdef CONFIG_IEEE802154_OTNS_CLI_LEGACY_CSL_PERIOD
+static void translate_legacy_csl_period(struct line *line)
+{
+    static const char prefix[] = "csl period ";
+    char             *end;
+    unsigned long     period;
+
+    if (strncmp(line->buf, prefix, sizeof(prefix) - 1) != 0)
+    {
+        return;
+    }
+
+    period = strtoul(line->buf + sizeof(prefix) - 1, &end, 10);
+    if (end == line->buf + sizeof(prefix) - 1 || *end != '\0')
+    {
+        return;
+    }
+
+    snprintf(line->buf, sizeof(line->buf), "%s%lu", prefix, period * OT_US_PER_TEN_SYMBOLS);
+}
+#endif
+
 static void thread_fn(void *a, void *b, void *c)
 {
     otInstance *instance;
@@ -161,6 +184,10 @@ static void thread_fn(void *a, void *b, void *c)
         {
             nsi_exit(0);
         }
+
+#ifdef CONFIG_IEEE802154_OTNS_CLI_LEGACY_CSL_PERIOD
+        translate_legacy_csl_period(&line);
+#endif
 
         openthread_mutex_lock();
         otCliInputLine(line.buf);
