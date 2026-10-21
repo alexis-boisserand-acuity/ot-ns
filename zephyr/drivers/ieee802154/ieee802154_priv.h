@@ -101,6 +101,8 @@ void nsi_otns_bottom_alarm_set_micro_at(uint64_t at_us);
 
 void nsi_otns_bottom_alarm_cancel_micro(void);
 
+void otns_apply_pending_drift_offset(void);
+
 #ifdef __cplusplus
 }
 #endif

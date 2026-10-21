@@ -54,6 +54,7 @@ ot-cli
 # zephyr build items
 /zephyr/build*/
 /zephyr/apps/build*/
+/zephyr/ot-versions/
 
 # pylibs installation files
 /pylibs/build/

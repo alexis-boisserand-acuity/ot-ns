@@ -47,6 +47,7 @@ LOG_MODULE_REGISTER(LOG_MODULE_NAME, LOG_LEVEL_INF);
 #include <nsi_main.h>
 
 #include "cli.h"
+#include "ieee802154_priv.h"
 
 #define CLI_LINE_MAX 384
 #define MSGQ_DEPTH 8
@@ -91,21 +92,6 @@ static int cli_output_cb(void *context, const char *format, va_list arg)
     return len;
 }
 
-extern int32_t nsi_otns_bottom_get_drift_offset_ms(void);
-extern void    alarm_milli_set_time_offset_ms(int32_t offset_ms);
-
-static void apply_pending_drift_offset(void)
-{
-    static int32_t last_offset_ms;
-    int32_t        offset_ms = nsi_otns_bottom_get_drift_offset_ms();
-
-    if (offset_ms != last_offset_ms)
-    {
-        last_offset_ms = offset_ms;
-        alarm_milli_set_time_offset_ms(offset_ms);
-    }
-}
-
 static void isr(const void *arg)
 {
     ARG_UNUSED(arg);
@@ -113,7 +99,7 @@ static void isr(const void *arg)
     uint8_t buf[INPUT_CHUNK_MAX];
     size_t  n;
 
-    apply_pending_drift_offset();
+    otns_apply_pending_drift_offset();
 
     while ((n = nsi_otns_cli_get_input(buf, sizeof(buf))) > 0)
     {
