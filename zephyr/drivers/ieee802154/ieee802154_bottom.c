@@ -121,6 +121,8 @@ static uint8_t                 sample_channel;
 static struct otns_radio_event sample_result;
 static bool                    sleep_pending;
 static uint64_t                rx_timestamp_us;
+static uint8_t                 tx_interferer_level;
+static bool                    interferer_cca_failed;
 
 static void report_state(void);
 static void radio_timer_fired(void);
@@ -128,6 +130,8 @@ static void start_pending_operation(void);
 static void wake_pacer_now(void);
 static void complete_tx(uint8_t error);
 static void cancel_sample(void);
+static void interferer_timer_fired(void);
+static void interferer_deliver(const struct otns_radio_event *ev);
 
 static uint8_t ext_addr[OT_EXT_ADDRESS_SIZE];
 static bool    ext_addr_valid;
@@ -612,6 +616,12 @@ static void deliver_to_embedded(const struct otns_radio_event *ev)
         radio_timer_fired();
     }
 
+    if (tx_interferer_level > 0)
+    {
+        interferer_deliver(ev);
+        return;
+    }
+
     if (ev->data.mChannel != radio_channel)
     {
         return;
@@ -672,6 +682,33 @@ static int event_is_for_embedded(uint8_t type)
            type == OT_SIM_EVENT_RADIO_TX_DONE || type == OT_SIM_EVENT_RADIO_CHAN_SAMPLE;
 }
 
+static void set_tx_interferer_level(int32_t value)
+{
+    uint8_t level = (value < 0) ? 0 : ((value > 100) ? 100 : (uint8_t)value);
+
+    if (level == tx_interferer_level)
+    {
+        return;
+    }
+
+    bool was_active     = tx_interferer_level > 0;
+    tx_interferer_level = level;
+
+    if (level > 0 && !was_active)
+    {
+        complete_tx(OT_ERROR_ABORT);
+        cancel_sample();
+        interferer_cca_failed = false;
+        radio_channel         = current_channel;
+        set_sub_state(RFSIM_RADIO_SUBSTATE_READY, 1);
+    }
+    else if (level == 0)
+    {
+        radio_channel = current_channel;
+        set_sub_state(RFSIM_RADIO_SUBSTATE_READY, NSI_NEVER);
+    }
+}
+
 static void handle_rfsim_param_event(uint8_t event_type, const uint8_t *data, uint16_t datalen)
 {
     uint8_t data_out[RFSIM_PARAM_RSP_DATA_SIZE];
@@ -707,6 +744,9 @@ static void handle_rfsim_param_event(uint8_t event_type, const uint8_t *data, ui
         case RFSIM_PARAM_CSL_UNCERTAINTY:
             s_csl_uncertainty = (uint8_t)value;
             break;
+        case RFSIM_PARAM_TX_INTERFERER:
+            set_tx_interferer_level(value);
+            break;
         default:
             break;
         }
@@ -731,6 +771,9 @@ static void handle_rfsim_param_event(uint8_t event_type, const uint8_t *data, ui
         break;
     case RFSIM_PARAM_CSL_UNCERTAINTY:
         value = (int32_t)s_csl_uncertainty;
+        break;
+    case RFSIM_PARAM_TX_INTERFERER:
+        value = (int32_t)tx_interferer_level;
         break;
     default:
         param = RFSIM_PARAM_UNKNOWN;
@@ -1036,6 +1079,94 @@ static int send_sample(uint64_t duration)
     return write_event(OT_SIM_EVENT_RADIO_CHAN_SAMPLE, 0, data, sizeof(data));
 }
 
+static uint64_t interferer_rand_range(uint64_t lo, uint64_t hi) { return lo + (uint64_t)rand() % (hi - lo); }
+
+static void send_interference(uint64_t duration)
+{
+    uint8_t data[RADIO_COMM_EVENT_DATA_SIZE + RADIO_MSG_HDR];
+
+    data[0] = radio_channel;
+    data[1] = (uint8_t)radio_power;
+    data[2] = OT_TX_TYPE_INTF;
+    put_le64(&data[3], duration);
+    data[RADIO_COMM_EVENT_DATA_SIZE] = radio_channel;
+
+    report_state();
+    (void)write_event(OT_SIM_EVENT_RADIO_COMM_START, 0, data, sizeof(data));
+    wake_pacer_now();
+}
+
+static void interferer_timer_fired(void)
+{
+    switch (radio_sub_state)
+    {
+    case RFSIM_RADIO_SUBSTATE_READY:
+        radio_channel = current_channel;
+        if (interferer_cca_failed)
+        {
+            set_sub_state(RFSIM_RADIO_SUBSTATE_CW_BACKOFF,
+                          interferer_rand_range(0, OT_RADIO_WIFI_CWMIN_SLOTS) * OT_RADIO_WIFI_SLOT_TIME_US);
+        }
+        else
+        {
+            uint64_t delay = 1;
+            if (tx_interferer_level < 100)
+            {
+                delay = interferer_rand_range(1, 1000000 - (uint64_t)tx_interferer_level * 10000);
+            }
+            set_sub_state(RFSIM_RADIO_SUBSTATE_AWAIT_CCA, delay);
+        }
+        break;
+
+    case RFSIM_RADIO_SUBSTATE_CW_BACKOFF:
+    case RFSIM_RADIO_SUBSTATE_AWAIT_CCA:
+        set_sub_state(RFSIM_RADIO_SUBSTATE_TX_CCA, OT_RADIO_WIFI_CCA_TIME_US + FAILSAFE_TIME_US);
+        if (send_sample(OT_RADIO_WIFI_CCA_TIME_US) < 0)
+        {
+            set_sub_state(RFSIM_RADIO_SUBSTATE_READY, 1);
+        }
+        break;
+
+    case RFSIM_RADIO_SUBSTATE_TX_CCA_TO_TX:
+    {
+        uint64_t duration =
+            interferer_rand_range(OT_RADIO_WIFI_MAX_TXTIME_US / 6, (uint64_t)OT_RADIO_WIFI_MAX_TXTIME_US + 1);
+        send_interference(duration);
+        set_sub_state(RFSIM_RADIO_SUBSTATE_TX_FRAME_ONGOING, duration + FAILSAFE_TIME_US);
+        break;
+    }
+
+    default:
+        /* CCA, frame and turnaround timeouts all restart the interferer cycle. */
+        set_sub_state(RFSIM_RADIO_SUBSTATE_READY, 1);
+        break;
+    }
+}
+
+static void interferer_deliver(const struct otns_radio_event *ev)
+{
+    if (ev->type != OT_SIM_EVENT_RADIO_CHAN_SAMPLE || radio_sub_state != RFSIM_RADIO_SUBSTATE_TX_CCA ||
+        ev->data.mChannel != radio_channel)
+    {
+        return;
+    }
+
+    bool clear = ev->data.mError == OT_ERROR_NONE &&
+                 (ev->data.mPower == (int8_t)OT_RADIO_RSSI_INVALID || ev->data.mPower < s_cca_threshold);
+
+    if (clear)
+    {
+        interferer_cca_failed = false;
+        set_sub_state(RFSIM_RADIO_SUBSTATE_TX_CCA_TO_TX, OT_RADIO_WIFI_SLOT_TIME_US);
+    }
+    else
+    {
+        /* A busy CCA makes the next attempt back off, as Wi-Fi CSMA/CA does. */
+        interferer_cca_failed = true;
+        set_sub_state(RFSIM_RADIO_SUBSTATE_READY, 1);
+    }
+}
+
 static void start_pending_operation(void)
 {
     if (radio_sub_state != RFSIM_RADIO_SUBSTATE_READY)
@@ -1076,6 +1207,12 @@ static void start_pending_operation(void)
 
 static void radio_timer_fired(void)
 {
+    if (tx_interferer_level > 0)
+    {
+        interferer_timer_fired();
+        return;
+    }
+
     struct otns_radio_event result = {0};
 
     result.data.mChannel = radio_channel;
@@ -1196,6 +1333,10 @@ int nsi_otns_bottom_tx(uint8_t channel, int8_t power, const uint8_t *psdu, uint1
     {
         return -EIO;
     }
+    if (tx_interferer_level > 0)
+    {
+        return -EBUSY;
+    }
     if (len < 3 || len > OT_RADIO_FRAME_MAX_SIZE)
     {
         return -EINVAL;
@@ -1255,6 +1396,10 @@ static int request_sample(uint8_t channel, uint64_t duration, bool scan)
     {
         return -EIO;
     }
+    if (tx_interferer_level > 0)
+    {
+        return -EBUSY;
+    }
     if (tx_pending || sample_pending ||
         (radio_sub_state != RFSIM_RADIO_SUBSTATE_READY && radio_sub_state != RFSIM_RADIO_SUBSTATE_IFS_WAIT &&
          radio_sub_state != RFSIM_RADIO_SUBSTATE_STARTUP))
@@ -1280,6 +1425,11 @@ int nsi_otns_bottom_energy_scan(uint8_t channel, uint16_t duration_ms)
 void nsi_otns_bottom_set_state(uint8_t state, uint8_t channel)
 {
     current_channel = channel;
+    if (tx_interferer_level > 0)
+    {
+        radio_state = state;
+        return;
+    }
     if (state == OT_RADIO_STATE_RECEIVE && tx_pending && radio_state == OT_RADIO_STATE_TRANSMIT)
     {
         return;
