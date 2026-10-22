@@ -53,6 +53,7 @@
 #include "nsi_tasks.h"
 #include "nsi_tracing.h"
 
+#include "event_sim_ref.h"
 #include "ieee802154_frame.h"
 #include "ieee802154_priv.h"
 
@@ -71,10 +72,8 @@ static uint32_t    cmd_node_id;
 static const char *cmd_socket;
 static int32_t     cmd_seed;
 
-static int      fd = -1;
-static bool     connected;
-static bool     disabled;
-static uint64_t last_msg_id;
+static bool connected;
+static bool disabled;
 
 static uint64_t pacer_time;
 
@@ -155,14 +154,6 @@ static int32_t  s_drift_offset_ms_applied = 0;
 /* Little-endian (de)serialization helpers                                   */
 /* ------------------------------------------------------------------------- */
 
-static inline void put_le64(uint8_t *p, uint64_t v)
-{
-    for (int i = 0; i < 8; i++)
-    {
-        p[i] = (v >> (8 * i)) & 0xff;
-    }
-}
-
 static inline int32_t get_le32(const uint8_t *p)
 {
     return (int32_t)((uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24));
@@ -185,14 +176,6 @@ static void set_sub_state(RadioSubState state, uint64_t duration)
     radio_event_time = duration == NSI_NEVER ? NSI_NEVER : nsi_hws_get_time() + duration;
     nsi_hws_find_next_event();
     wake_pacer_now();
-}
-
-static inline void put_le32(uint8_t *p, int32_t v)
-{
-    p[0] = (uint8_t)(v & 0xff);
-    p[1] = (uint8_t)((v >> 8) & 0xff);
-    p[2] = (uint8_t)((v >> 16) & 0xff);
-    p[3] = (uint8_t)((v >> 24) & 0xff);
 }
 
 static void update_alarm_drift_offset(uint64_t now)
@@ -232,7 +215,7 @@ static int read_full(void *buf, size_t n)
 
     while (got < n)
     {
-        ssize_t r = read(fd, (char *)buf + got, n - got);
+        ssize_t r = read(gSockFd, (char *)buf + got, n - got);
 
         if (r > 0)
         {
@@ -276,47 +259,6 @@ static int read_event(struct Event *ev)
     return 0;
 }
 
-static int write_event(uint8_t type, uint64_t delay, const uint8_t *data, uint16_t datalen)
-{
-    if (fd < 0)
-    {
-        return -1;
-    }
-    if (datalen > OT_EVENT_DATA_MAX_SIZE)
-    {
-        return -1;
-    }
-
-    struct Event event;
-    event.mDelay      = delay;
-    event.mEvent      = type;
-    event.mMsgId      = last_msg_id;
-    event.mDataLength = datalen;
-    if (datalen > 0)
-    {
-        memcpy(event.mData, data, datalen);
-    }
-
-    size_t total = sizeof(struct EventHeader) + datalen;
-    size_t sent  = 0;
-    while (sent < total)
-    {
-        ssize_t w = write(fd, (uint8_t *)&event + sent, total - sent);
-
-        if (w > 0)
-        {
-            sent += (size_t)w;
-            continue;
-        }
-        if (w < 0 && errno == EINTR)
-        {
-            continue;
-        }
-        return -1;
-    }
-    return 0;
-}
-
 /* ------------------------------------------------------------------------- */
 /* Connection / handshake                                                    */
 /* ------------------------------------------------------------------------- */
@@ -325,10 +267,10 @@ static void disconnect(void)
 {
     complete_tx(OT_ERROR_ABORT);
     cancel_sample();
-    if (fd >= 0)
+    if (gSockFd > 0)
     {
-        close(fd);
-        fd = -1;
+        close(gSockFd);
+        gSockFd = 0;
     }
     connected        = false;
     disabled         = true;
@@ -354,8 +296,8 @@ static int try_connect(void)
         return -1;
     }
 
-    fd = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (fd < 0)
+    int sock = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (sock < 0)
     {
         nsi_print_warning("ieee802154_otns: socket() failed\n");
         return -1;
@@ -365,29 +307,21 @@ static int try_connect(void)
     addr.sun_family = AF_UNIX;
     memcpy(addr.sun_path, cmd_socket, path_len);
 
-    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0)
+    if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0)
     {
         nsi_print_warning("ieee802154_otns: cannot connect to OTNS at %s\n", cmd_socket);
-        close(fd);
-        fd = -1;
+        close(sock);
         return -1;
     }
 
+    gSockFd   = sock;
     connected = true;
 
-    {
-        uint8_t node[4];
-
-        node[0] = cmd_node_id & 0xff;
-        node[1] = (cmd_node_id >> 8) & 0xff;
-        node[2] = (cmd_node_id >> 16) & 0xff;
-        node[3] = (cmd_node_id >> 24) & 0xff;
-        (void)write_event(OT_SIM_EVENT_NODE_INFO, 0, node, sizeof(node));
-    }
+    otSimSendNodeInfoEvent(cmd_node_id);
 
     if (ext_addr_valid)
     {
-        (void)write_event(OT_SIM_EVENT_EXT_ADDR, 0, ext_addr, OT_EXT_ADDRESS_SIZE);
+        otSimSendExtAddrEvent((const otExtAddress *)ext_addr);
     }
 
     nsi_print_trace("ieee802154_otns: connected to OTNS (node %u) at %s\n", cmd_node_id, cmd_socket);
@@ -711,9 +645,7 @@ static void set_tx_interferer_level(int32_t value)
 
 static void handle_rfsim_param_event(uint8_t event_type, const uint8_t *data, uint16_t datalen)
 {
-    uint8_t data_out[RFSIM_PARAM_RSP_DATA_SIZE];
-
-    if (datalen < sizeof(data_out))
+    if (datalen < RFSIM_PARAM_RSP_DATA_SIZE)
     {
         return;
     }
@@ -781,9 +713,7 @@ static void handle_rfsim_param_event(uint8_t event_type, const uint8_t *data, ui
         break;
     }
 
-    data_out[0] = param;
-    put_le32(&data_out[1], value);
-    (void)write_event(OT_SIM_EVENT_RFSIM_PARAM_RSP, 0, data_out, sizeof(data_out));
+    otSimSendRfSimParamRespEvent(param, value);
 }
 
 __attribute__((weak)) void nsi_otns_cli_feed_input(const uint8_t *buf, size_t len)
@@ -794,7 +724,7 @@ __attribute__((weak)) void nsi_otns_cli_feed_input(const uint8_t *buf, size_t le
 
 static void report_state(void)
 {
-    uint8_t data[sizeof(struct RadioStateEventData)];
+    struct RadioStateEventData data;
 
     if (radio_state == reported_state && radio_channel == reported_channel && radio_sub_state == reported_sub_state &&
         radio_event_time == reported_event_time && radio_power == reported_power &&
@@ -817,18 +747,15 @@ static void report_state(void)
         energy_state = OT_RADIO_STATE_RECEIVE;
     }
 
-    data[0] = radio_channel;
-    data[1] = (uint8_t)radio_power;
-    data[2] = (uint8_t)s_rx_sensitivity;
-    data[3] = energy_state;
-    data[4] = (uint8_t)radio_sub_state;
-    data[5] = radio_state;
-    put_le64(&data[6], now);
+    data.mChannel       = radio_channel;
+    data.mTxPower       = radio_power;
+    data.mRxSensitivity = s_rx_sensitivity;
+    data.mEnergyState   = energy_state;
+    data.mSubState      = (uint8_t)radio_sub_state;
+    data.mState         = radio_state;
+    data.mRadioTime     = now;
 
-    if (write_event(OT_SIM_EVENT_RADIO_STATE, delay, data, sizeof(data)) < 0)
-    {
-        return;
-    }
+    otSimSendRadioStateEvent(&data, delay);
 
     reported_state       = radio_state;
     reported_channel     = radio_channel;
@@ -883,12 +810,8 @@ static void pacer(void)
 
         report_state();
 
-        if (write_event(OT_SIM_EVENT_ALARM_FIRED, delay, NULL, 0) < 0)
-        {
-            fprintf(stderr, "[otns] write ALARM_FIRED failed\n");
-            disconnect();
-            return;
-        }
+        otns_event_sim_set_sleep_delay(delay);
+        otSimSendSleepEvent();
 
         struct Event raw;
 
@@ -898,7 +821,7 @@ static void pacer(void)
             disconnect();
             return;
         }
-        last_msg_id = raw.mMsgId;
+        gLastRecvEvent.mMsgId = raw.mMsgId;
 #ifdef OTNS_TRACE
         fprintf(stderr, "[otns] recv ev=%u delay=%llu\n", raw.mEvent, (unsigned long long)raw.mDelay);
 #endif
@@ -992,10 +915,10 @@ NSI_TASK(boot, HW_INIT, 500);
 
 static void cleanup(void)
 {
-    if (fd >= 0)
+    if (gSockFd > 0)
     {
-        close(fd);
-        fd = -1;
+        close(gSockFd);
+        gSockFd = 0;
     }
 }
 
@@ -1038,15 +961,12 @@ static int send_frame(uint8_t channel, int8_t power, const uint8_t *psdu, uint16
 
     uint64_t duration = (uint64_t)(OT_RADIO_SHR_PHR_LENGTH_BYTES + len) * 8U * 1000000U / s_phy_bitrate;
 
-    uint8_t data[RADIO_COMM_EVENT_DATA_SIZE + RADIO_MSG_HDR + OT_RADIO_FRAME_MAX_SIZE];
-    data[0] = channel;
-    data[1] = (uint8_t)power;
-    data[2] = OT_ERROR_NONE;
-    put_le64(&data[3], duration);
-    data[RADIO_COMM_EVENT_DATA_SIZE] = channel;
+    struct RadioCommEventData comm = {
+        .mChannel = channel, .mPower = power, .mError = OT_ERROR_NONE, .mDuration = duration};
+    struct RadioMessage msg;
 
-    uint16_t hdr_len = RADIO_COMM_EVENT_DATA_SIZE + RADIO_MSG_HDR;
-    memcpy(&data[hdr_len], psdu, len);
+    msg.mChannel = channel;
+    memcpy(msg.mPsdu, psdu, len);
 
     radio_channel = channel;
     radio_power   = power;
@@ -1058,10 +978,7 @@ static int send_frame(uint8_t channel, int8_t power, const uint8_t *psdu, uint16
                   duration + FAILSAFE_TIME_US);
     report_state();
 
-    if (write_event(OT_SIM_EVENT_RADIO_COMM_START, 0, data, (uint16_t)(hdr_len + len)) < 0)
-    {
-        return -1;
-    }
+    otSimSendRadioCommEvent(&comm, (const uint8_t *)&msg, RADIO_MSG_HDR + len);
 
     wake_pacer_now();
     return 0;
@@ -1069,30 +986,23 @@ static int send_frame(uint8_t channel, int8_t power, const uint8_t *psdu, uint16
 
 static int send_sample(uint64_t duration)
 {
-    uint8_t data[RADIO_COMM_EVENT_DATA_SIZE];
+    struct RadioCommEventData sample = {
+        .mChannel = radio_channel, .mPower = 0, .mError = OT_ERROR_NONE, .mDuration = duration};
 
-    data[0] = radio_channel;
-    data[1] = 0;
-    data[2] = OT_ERROR_NONE;
-    put_le64(&data[3], duration);
     report_state();
-    return write_event(OT_SIM_EVENT_RADIO_CHAN_SAMPLE, 0, data, sizeof(data));
+    otSimSendRadioChanSampleEvent(&sample);
+    return 0;
 }
 
 static uint64_t interferer_rand_range(uint64_t lo, uint64_t hi) { return lo + (uint64_t)rand() % (hi - lo); }
 
 static void send_interference(uint64_t duration)
 {
-    uint8_t data[RADIO_COMM_EVENT_DATA_SIZE + RADIO_MSG_HDR];
-
-    data[0] = radio_channel;
-    data[1] = (uint8_t)radio_power;
-    data[2] = OT_TX_TYPE_INTF;
-    put_le64(&data[3], duration);
-    data[RADIO_COMM_EVENT_DATA_SIZE] = radio_channel;
+    struct RadioCommEventData intf = {
+        .mChannel = radio_channel, .mPower = radio_power, .mError = OT_TX_TYPE_INTF, .mDuration = duration};
 
     report_state();
-    (void)write_event(OT_SIM_EVENT_RADIO_COMM_START, 0, data, sizeof(data));
+    otSimSendRadioCommInterferenceEvent(&intf);
     wake_pacer_now();
 }
 
@@ -1489,7 +1399,7 @@ void nsi_otns_bottom_send_uart(const uint8_t *buf, uint16_t len)
         return;
     }
 
-    (void)write_event(OT_SIM_EVENT_UART_WRITE, 0, buf, len);
+    otSimSendUartWriteEvent(buf, len);
     wake_pacer_now();
 }
 
@@ -1508,7 +1418,7 @@ void nsi_otns_bottom_send_ext_addr(const uint8_t *ext_addr_be)
         return;
     }
 
-    (void)write_event(OT_SIM_EVENT_EXT_ADDR, 0, ext_addr, OT_EXT_ADDRESS_SIZE);
+    otSimSendExtAddrEvent((const otExtAddress *)ext_addr);
     wake_pacer_now();
 }
 
@@ -1525,7 +1435,7 @@ void nsi_otns_bottom_send_status(const char *status, uint16_t len)
         return;
     }
 
-    (void)write_event(OT_SIM_EVENT_OTNS_STATUS_PUSH, 0, (const uint8_t *)status, len);
+    otSimSendOtnsStatusPushEvent(status, len);
     wake_pacer_now();
 }
 
@@ -1543,12 +1453,14 @@ bool nsi_otns_bottom_get_event(struct otns_radio_event *ev)
 
 void nsi_otns_bottom_send_msg_to_host(uint8_t type, const uint8_t *data, uint16_t len)
 {
-    if (!connected)
+    if (!connected || len < sizeof(struct MsgToHostEventData))
     {
         return;
     }
 
-    (void)write_event(type, 0, data, len);
+    otSimSendMsgToHostEvent(type, (struct MsgToHostEventData *)data,
+                            (uint8_t *)data + sizeof(struct MsgToHostEventData),
+                            len - sizeof(struct MsgToHostEventData));
     wake_pacer_now();
 }
 

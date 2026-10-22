@@ -89,12 +89,6 @@ uint16_t crc16(const uint8_t *data, size_t len)
 /* 802.15.4 frame parsing                                                    */
 /* ------------------------------------------------------------------------- */
 
-/*
- * parse_frame() and the ACK/address-matching primitives are implemented in
- * ieee802154_frame_parse.c, which is compiled into both this embedded image
- * and the host-side native_simulator executable, so the decision logic has
- * a single source of truth on both sides.
- */
 bool frame_is_for_me(const uint8_t *psdu, uint16_t len, struct frame_addr_info *info)
 {
     return frame_addr_matches(psdu, len, info, data.short_addr, data.ext_addr);
@@ -994,10 +988,6 @@ int refresh_ack(uint8_t *psdu, uint16_t len)
     {
         struct net_pkt pkt = {0};
 
-        /* This ACK has no encrypted payload and has not been sent yet. Keep
-         * its reserved counter (already reported to OpenThread), but replace
-         * the MIC after updating authenticated header fields.
-         */
         net_pkt_set_ieee802154_mac_hdr_rdy(&pkt, true);
         int ret = encrypt_tx_frame(psdu, len - FCS_SIZE, &pkt);
 

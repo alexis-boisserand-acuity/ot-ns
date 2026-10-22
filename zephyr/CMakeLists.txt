@@ -44,9 +44,14 @@ if(CONFIG_IEEE802154_OTNS)
     -I${otns_drv_dir}
     -I${CMAKE_CURRENT_SOURCE_DIR}/..
     -I${CMAKE_CURRENT_SOURCE_DIR}/../openthread/include
+    -I${CMAKE_CURRENT_SOURCE_DIR}/../openthread/src/core
+    -I${CMAKE_CURRENT_SOURCE_DIR}/../openthread/src
     -I${CMAKE_CURRENT_SOURCE_DIR}/../ot-rfsim/src
+    -DOPENTHREAD_PROJECT_CORE_CONFIG_FILE=\\\"openthread-core-rfsim-config.h\\\"
   )
   target_sources(native_simulator INTERFACE ${otns_drv_dir}/ieee802154_bottom.c)
+  target_sources(native_simulator INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/../ot-rfsim/src/event-sim.c)
+  target_sources(native_simulator INTERFACE ${otns_drv_dir}/event_sim_ref.c)
   target_sources(native_simulator INTERFACE ${otns_drv_dir}/ieee802154_frame_parse.c)
   target_sources(native_simulator INTERFACE ${otns_drv_dir}/alarm_isr_bottom.c)
   target_sources(native_simulator INTERFACE ${otns_drv_dir}/cli_bottom.c)

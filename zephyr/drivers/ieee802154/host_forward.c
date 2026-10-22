@@ -24,14 +24,6 @@
  * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
  * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
  * POSSIBILITY OF SUCH DAMAGE.
- *
- * Border router forwarding between the OpenThread node and the simulation host.
- *
- * Mirrors ot-rfsim's platform-rfsim.c: IPv6 datagrams and UDP messages that leave the
- * Thread network towards the host are sent to the host as *_TO_HOST events, and
- * *_FROM_HOST events from the host are injected into OpenThread. Outbound callbacks run in
- * OpenThread context; inbound events are queued by the bottom side and injected from
- * otns_host_forward_process(), which is called from the OpenThread alarm process hook.
  */
 
 #include <string.h>
