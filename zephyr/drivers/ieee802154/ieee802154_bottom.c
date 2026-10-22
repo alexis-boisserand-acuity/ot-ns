@@ -84,10 +84,14 @@ static bool                    have_pending;
 static struct otns_radio_event deliver_ev;
 static bool                    deliver_ready;
 
-static uint8_t  ack_channel;
-static int8_t   ack_power;
-static uint8_t  ack_psdu[OT_RADIO_FRAME_MAX_SIZE];
-static uint16_t ack_psdu_len;
+#define OTNS_HOST_MSG_QUEUE_LEN 4
+static struct otns_host_msg host_msgs[OTNS_HOST_MSG_QUEUE_LEN];
+static unsigned             host_msg_head;
+static unsigned             host_msg_count;
+static uint8_t              ack_channel;
+static int8_t               ack_power;
+static uint8_t              ack_psdu[OT_RADIO_FRAME_MAX_SIZE];
+static uint16_t             ack_psdu_len;
 
 static uint8_t                 radio_state         = OT_RADIO_STATE_DISABLED;
 static uint8_t                 radio_channel       = OT_RADIO_2P4GHZ_OQPSK_CHANNEL_MIN;
@@ -406,6 +410,24 @@ static void raise_embedded(const struct otns_radio_event *ev)
 {
     deliver_ev    = *ev;
     deliver_ready = true;
+
+    hw_irq_ctrl_raise_im(IEEE802154_OTNS_IRQ);
+}
+
+static void queue_host_msg(const struct Event *raw)
+{
+    if (host_msg_count == OTNS_HOST_MSG_QUEUE_LEN)
+    {
+        fprintf(stderr, "[otns] host message queue full, dropping ev=%u\n", raw->mEvent);
+        return;
+    }
+
+    struct otns_host_msg *slot = &host_msgs[(host_msg_head + host_msg_count) % OTNS_HOST_MSG_QUEUE_LEN];
+
+    slot->type = raw->mEvent;
+    slot->len  = raw->mDataLength;
+    memcpy(slot->data, raw->mData, raw->mDataLength);
+    host_msg_count++;
 
     hw_irq_ctrl_raise_im(IEEE802154_OTNS_IRQ);
 }
@@ -847,6 +869,10 @@ static void pacer(void)
             else if (raw.mEvent == OT_SIM_EVENT_RFSIM_PARAM_GET || raw.mEvent == OT_SIM_EVENT_RFSIM_PARAM_SET)
             {
                 handle_rfsim_param_event(raw.mEvent, raw.mData, raw.mDataLength);
+            }
+            else if (raw.mEvent == OT_SIM_EVENT_UDP_FROM_HOST || raw.mEvent == OT_SIM_EVENT_IP6_FROM_HOST)
+            {
+                queue_host_msg(&raw);
             }
             pacer_time = now + raw.mDelay;
             return;
@@ -1363,4 +1389,37 @@ bool nsi_otns_bottom_get_event(struct otns_radio_event *ev)
     *ev           = deliver_ev;
     deliver_ready = false;
     return true;
+}
+
+void nsi_otns_bottom_send_msg_to_host(uint8_t type, const uint8_t *data, uint16_t len)
+{
+    if (!connected)
+    {
+        return;
+    }
+
+    (void)write_event(type, 0, data, len);
+    wake_pacer_now();
+}
+
+bool nsi_otns_bottom_host_msg_pending(void) { return host_msg_count > 0; }
+
+bool nsi_otns_bottom_peek_host_msg(const struct otns_host_msg **msg)
+{
+    if (host_msg_count == 0)
+    {
+        return false;
+    }
+
+    *msg = &host_msgs[host_msg_head];
+    return true;
+}
+
+void nsi_otns_bottom_pop_host_msg(void)
+{
+    if (host_msg_count > 0)
+    {
+        host_msg_head = (host_msg_head + 1) % OTNS_HOST_MSG_QUEUE_LEN;
+        host_msg_count--;
+    }
 }

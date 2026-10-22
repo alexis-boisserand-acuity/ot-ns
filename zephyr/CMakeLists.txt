@@ -13,6 +13,9 @@ if(CONFIG_IEEE802154_OTNS)
   zephyr_library_sources(${otns_drv_dir}/cli.c)
   zephyr_library_sources(${otns_drv_dir}/radio_cca.c)
   zephyr_library_sources_ifdef(CONFIG_OPENTHREAD_BORDER_ROUTING ${otns_drv_dir}/infra_if.c)
+  if(CONFIG_OPENTHREAD_BORDER_ROUTING AND CONFIG_OPENTHREAD_UDP_FORWARD)
+    zephyr_library_sources(${otns_drv_dir}/host_forward.c)
+  endif()
 
   zephyr_ld_options(
     -Wl,--wrap=otPlatRadioGetCcaEnergyDetectThreshold
@@ -29,6 +32,9 @@ if(CONFIG_IEEE802154_OTNS)
     -Wl,--wrap=platformAlarmMicroProcess
     -Wl,--wrap=alarm_milli_set_time_offset_ms
   )
+  if(CONFIG_OPENTHREAD_BORDER_ROUTING AND CONFIG_OPENTHREAD_UDP_FORWARD)
+    zephyr_ld_options(-Wl,--wrap=openthread_set_receive_cb)
+  endif()
 
   zephyr_include_directories(${otns_drv_dir})
   zephyr_include_directories(${CMAKE_CURRENT_SOURCE_DIR}/..)

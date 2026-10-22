@@ -129,6 +129,10 @@ void __wrap_platformAlarmMicroInit(void)
 
 void __wrap_platformAlarmMilliProcess(otInstance *aInstance)
 {
+#if defined(CONFIG_OPENTHREAD_BORDER_ROUTING) && defined(CONFIG_OPENTHREAD_UDP_FORWARD)
+    otns_host_forward_process(aInstance);
+#endif
+
     if (milli_fired)
     {
         milli_fired = false;

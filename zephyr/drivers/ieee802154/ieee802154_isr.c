@@ -36,6 +36,8 @@
 #include <zephyr/net/net_pkt.h>
 #include <zephyr/sys/byteorder.h>
 
+#include <openthread-system.h>
+
 #include "ieee802154_data.h"
 #include "ieee802154_frame.h"
 #include "ieee802154_isr.h"
@@ -208,6 +210,11 @@ void isr(const void *arg)
     ARG_UNUSED(arg);
 
     otns_apply_pending_drift_offset();
+
+    if (nsi_otns_bottom_host_msg_pending())
+    {
+        otSysEventSignalPending();
+    }
 
     while (nsi_otns_bottom_get_event(&ev))
     {

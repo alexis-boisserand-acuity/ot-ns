@@ -53,6 +53,13 @@ struct otns_radio_event
     uint8_t                   psdu[OT_RADIO_FRAME_MAX_SIZE];
 };
 
+struct otns_host_msg
+{
+    uint8_t  type;
+    uint16_t len;
+    uint8_t  data[OT_EVENT_DATA_MAX_SIZE];
+};
+
 int nsi_otns_bottom_get_node_id(void);
 
 bool nsi_otns_bottom_is_connected(void);
@@ -85,6 +92,14 @@ void nsi_otns_bottom_set_own_addr(const uint8_t *short_addr, const uint8_t *ext_
 
 void nsi_otns_bottom_send_status(const char *status, uint16_t len);
 
+void nsi_otns_bottom_send_msg_to_host(uint8_t type, const uint8_t *data, uint16_t len);
+
+bool nsi_otns_bottom_host_msg_pending(void);
+
+bool nsi_otns_bottom_peek_host_msg(const struct otns_host_msg **msg);
+
+void nsi_otns_bottom_pop_host_msg(void);
+
 bool nsi_otns_bottom_get_event(struct otns_radio_event *ev);
 
 int32_t nsi_otns_bottom_get_drift_offset_ms(void);
@@ -102,6 +117,10 @@ void nsi_otns_bottom_alarm_set_micro_at(uint64_t at_us);
 void nsi_otns_bottom_alarm_cancel_micro(void);
 
 void otns_apply_pending_drift_offset(void);
+
+struct otInstance;
+
+void otns_host_forward_process(struct otInstance *aInstance);
 
 #ifdef __cplusplus
 }
