@@ -107,25 +107,27 @@ bool parse_frame(const uint8_t *psdu, uint16_t len, struct frame_addr_info *info
         src_pan_present = info->src_mode != ADDR_MODE_NONE && !pc;
     }
 
+    if (dst_pan_present)
+    {
+        if (off + PAN_ID_SIZE > len)
+        {
+            return false;
+        }
+        info->dst_pan         = frame_le16(&psdu[off]);
+        info->dst_pan_present = true;
+        off += PAN_ID_SIZE;
+    }
+
     if (info->dst_mode != ADDR_MODE_NONE)
     {
-        if (dst_pan_present)
-        {
-            if (off + PAN_ID_SIZE > len)
-            {
-                return false;
-            }
-            info->dst_pan         = frame_le16(&psdu[off]);
-            info->dst_pan_present = true;
-            off += PAN_ID_SIZE;
-        }
-
         info->dst_off = off;
         off += (info->dst_mode == ADDR_MODE_EXT) ? OT_EXT_ADDRESS_SIZE : SHORT_ADDR_SIZE;
         if (off > len)
         {
             return false;
         }
+        info->dst_broadcast =
+            info->dst_mode == ADDR_MODE_SHORT && frame_le16(&psdu[info->dst_off]) == OT_RADIO_BROADCAST_SHORT_ADDR;
     }
 
     if (info->src_mode != ADDR_MODE_NONE)
@@ -154,10 +156,15 @@ bool parse_frame(const uint8_t *psdu, uint16_t len, struct frame_addr_info *info
 bool frame_addr_matches(const uint8_t          *psdu,
                         uint16_t                len,
                         struct frame_addr_info *info,
+                        uint16_t                pan_id,
                         const uint8_t          *own_short_addr,
                         const uint8_t          *own_ext_addr)
 {
     if (!parse_frame(psdu, len, info))
+    {
+        return false;
+    }
+    if (info->dst_pan_present && info->dst_pan != OT_PANID_BROADCAST && info->dst_pan != pan_id)
     {
         return false;
     }
@@ -168,11 +175,7 @@ bool frame_addr_matches(const uint8_t          *psdu,
         {
             return false;
         }
-        if (frame_le16(&psdu[info->dst_off]) == OT_RADIO_BROADCAST_SHORT_ADDR)
-        {
-            return false;
-        }
-        return memcmp(&psdu[info->dst_off], own_short_addr, SHORT_ADDR_SIZE) == 0;
+        return info->dst_broadcast || memcmp(&psdu[info->dst_off], own_short_addr, SHORT_ADDR_SIZE) == 0;
     }
 
     if (info->dst_mode == ADDR_MODE_EXT)
@@ -184,7 +187,7 @@ bool frame_addr_matches(const uint8_t          *psdu,
         return memcmp(&psdu[info->dst_off], own_ext_addr, OT_EXT_ADDRESS_SIZE) == 0;
     }
 
-    return false;
+    return info->dst_mode == ADDR_MODE_NONE;
 }
 
 bool frame_is_ack(const uint8_t *psdu, uint16_t len)

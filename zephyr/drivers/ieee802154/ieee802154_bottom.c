@@ -77,8 +77,8 @@ static bool disabled;
 
 static uint64_t pacer_time;
 
-static struct otns_radio_event pending_ev;
-static bool                    have_pending;
+static struct Event pending_ev;
+static bool         have_pending;
 
 static struct otns_radio_event deliver_ev;
 static bool                    deliver_ready;
@@ -135,8 +135,9 @@ static void interferer_deliver(const struct otns_radio_event *ev);
 static uint8_t ext_addr[OT_EXT_ADDRESS_SIZE];
 static bool    ext_addr_valid;
 
-static uint8_t own_short_addr[SHORT_ADDR_SIZE];
-static uint8_t own_ext_addr[OT_EXT_ADDRESS_SIZE];
+static uint8_t  own_short_addr[SHORT_ADDR_SIZE];
+static uint8_t  own_ext_addr[OT_EXT_ADDRESS_SIZE];
+static uint16_t own_pan_id;
 
 static int8_t   s_rx_sensitivity  = RFSIM_RX_SENSITIVITY_DEFAULT_DBM;
 static int8_t   s_cca_threshold   = RFSIM_CCA_ED_THRESHOLD_DEFAULT_DBM;
@@ -201,7 +202,11 @@ static void update_alarm_drift_offset(uint64_t now)
     }
 }
 
-int32_t nsi_otns_bottom_get_drift_offset_ms(void) { return s_drift_offset_ms_applied; }
+int32_t nsi_otns_bottom_get_drift_offset_ms(void)
+{
+    update_alarm_drift_offset(nsi_hws_get_time());
+    return s_drift_offset_ms_applied;
+}
 
 uint8_t nsi_otns_bottom_get_csl_accuracy(void) { return s_csl_accuracy; }
 
@@ -419,13 +424,14 @@ static void handle_comm_start_event(const struct otns_radio_event *ev)
     }
 }
 
-static void radio_receive(const struct otns_radio_event *ev, const struct otns_radio_event *received)
+static void radio_receive(const struct otns_radio_event *ev, const struct otns_radio_event *received, bool accepted)
 {
     bool is_ack = frame_is_ack(ev->psdu, ev->psdu_len);
 
     if (tx_wait && tx_wants_ack)
     {
-        bool is_awaited_ack_received = is_ack && ev->data.mError == OT_ERROR_NONE && ev->psdu_len >= ACK_FRAME_SIZE &&
+        bool is_awaited_ack_received = accepted && is_ack && ev->data.mError == OT_ERROR_NONE &&
+                                       ev->psdu_len >= ACK_FRAME_SIZE &&
                                        ev->psdu[SEQ_NUM_OFFSET] == tx_psdu[SEQ_NUM_OFFSET];
 
         if (is_awaited_ack_received)
@@ -434,7 +440,7 @@ static void radio_receive(const struct otns_radio_event *ev, const struct otns_r
         }
         complete_tx(is_awaited_ack_received ? OT_ERROR_NONE : OT_ERROR_NO_ACK);
     }
-    else if (!is_ack && ev->data.mError == OT_ERROR_NONE)
+    else if (accepted && !is_ack && ev->data.mError == OT_ERROR_NONE)
     {
         raise_embedded(received);
     }
@@ -462,12 +468,12 @@ static void handle_rx_done_event(const struct otns_radio_event *ev)
 
     bool is_ack           = frame_is_ack(ev->psdu, ev->psdu_len);
     bool is_ack_requested = frame_is_ack_requested(ev->psdu, ev->psdu_len);
-    bool is_addr_match    = frame_addr_matches(ev->psdu, ev->psdu_len, &info, own_short_addr, own_ext_addr);
+    bool is_addr_match    = frame_addr_matches(ev->psdu, ev->psdu_len, &info, own_pan_id, own_short_addr, own_ext_addr);
 
     received.timestamp_us = rx_timestamp_us;
 
     if (radio_sub_state == RFSIM_RADIO_SUBSTATE_RX_FRAME_ONGOING && ev->data.mError == OT_ERROR_NONE &&
-        is_ack_requested && !is_ack && is_addr_match)
+        is_ack_requested && !is_ack && is_addr_match && info.dst_off != FRAME_OFF_NONE && !info.dst_broadcast)
     {
         ack_psdu_len = 0;
         set_sub_state(RFSIM_RADIO_SUBSTATE_RX_AIFS_WAIT, OT_RADIO_AIFS_TIME_US);
@@ -482,7 +488,7 @@ static void handle_rx_done_event(const struct otns_radio_event *ev)
         set_sub_state(RFSIM_RADIO_SUBSTATE_IFS_WAIT, tx_ifs_time());
     }
 
-    radio_receive(ev, &received);
+    radio_receive(ev, &received, is_addr_match);
 }
 
 static void handle_tx_done_event(const struct otns_radio_event *ev)
@@ -584,8 +590,20 @@ static void deliver_to_embedded(const struct otns_radio_event *ev)
     }
 }
 
-static void parse_radio_event(struct otns_radio_event *out, const struct Event *raw)
+static bool parse_radio_event(struct otns_radio_event *out, const struct Event *raw)
 {
+    size_t min_len = RADIO_COMM_EVENT_DATA_SIZE;
+
+    if (raw->mEvent == OT_SIM_EVENT_RADIO_RX_DONE)
+    {
+        min_len += RADIO_MSG_HDR + FCF_SIZE + FCS_SIZE;
+    }
+    if (raw->mDataLength < min_len || raw->mDataLength > RADIO_COMM_EVENT_DATA_SIZE + RADIO_MSG_HDR + sizeof(out->psdu))
+    {
+        nsi_print_warning("ieee802154_otns: invalid radio event length %u (ev=%u)\n", raw->mDataLength, raw->mEvent);
+        return false;
+    }
+
     out->type           = raw->mEvent;
     out->data.mChannel  = raw->mData[0];
     out->data.mPower    = (int8_t)raw->mData[1];
@@ -600,14 +618,11 @@ static void parse_radio_event(struct otns_radio_event *out, const struct Event *
         {
             uint16_t len = raw->mDataLength - RADIO_COMM_EVENT_DATA_SIZE - RADIO_MSG_HDR;
 
-            if (len > sizeof(out->psdu))
-            {
-                len = sizeof(out->psdu);
-            }
             memcpy(out->psdu, &raw->mData[RADIO_COMM_EVENT_DATA_SIZE + RADIO_MSG_HDR], len);
             out->psdu_len = len;
         }
     }
+    return true;
 }
 
 static int event_is_for_embedded(uint8_t type)
@@ -667,6 +682,7 @@ static void handle_rfsim_param_event(uint8_t event_type, const uint8_t *data, ui
             s_phy_bitrate = (value < 1) ? 1 : (uint64_t)value;
             break;
         case RFSIM_PARAM_CLOCK_DRIFT:
+            update_alarm_drift_offset(nsi_hws_get_time());
             s_clock_drift_ppm = (int16_t)value;
             s_drift_last_time = nsi_hws_get_time();
             break;
@@ -720,6 +736,31 @@ __attribute__((weak)) void nsi_otns_cli_feed_input(const uint8_t *buf, size_t le
 {
     (void)buf;
     (void)len;
+}
+
+static void deliver_event(const struct Event *raw)
+{
+    if (event_is_for_embedded(raw->mEvent))
+    {
+        struct otns_radio_event ev;
+
+        if (parse_radio_event(&ev, raw))
+        {
+            deliver_to_embedded(&ev);
+        }
+    }
+    else if (raw->mEvent == OT_SIM_EVENT_UART_WRITE)
+    {
+        nsi_otns_cli_feed_input(raw->mData, raw->mDataLength);
+    }
+    else if (raw->mEvent == OT_SIM_EVENT_RFSIM_PARAM_GET || raw->mEvent == OT_SIM_EVENT_RFSIM_PARAM_SET)
+    {
+        handle_rfsim_param_event(raw->mEvent, raw->mData, raw->mDataLength);
+    }
+    else if (raw->mEvent == OT_SIM_EVENT_UDP_FROM_HOST || raw->mEvent == OT_SIM_EVENT_IP6_FROM_HOST)
+    {
+        queue_host_msg(raw);
+    }
 }
 
 static void report_state(void)
@@ -790,7 +831,7 @@ static void pacer(void)
     if (have_pending)
     {
         have_pending = false;
-        deliver_to_embedded(&pending_ev);
+        deliver_event(&pending_ev);
     }
 
     for (;;)
@@ -826,37 +867,20 @@ static void pacer(void)
         fprintf(stderr, "[otns] recv ev=%u delay=%llu\n", raw.mEvent, (unsigned long long)raw.mDelay);
 #endif
 
-        if (!event_is_for_embedded(raw.mEvent))
+        if (raw.mDelay != 0)
         {
-            if (raw.mEvent == OT_SIM_EVENT_UART_WRITE)
-            {
-                nsi_otns_cli_feed_input(raw.mData, raw.mDataLength);
-            }
-            else if (raw.mEvent == OT_SIM_EVENT_RFSIM_PARAM_GET || raw.mEvent == OT_SIM_EVENT_RFSIM_PARAM_SET)
-            {
-                handle_rfsim_param_event(raw.mEvent, raw.mData, raw.mDataLength);
-            }
-            else if (raw.mEvent == OT_SIM_EVENT_UDP_FROM_HOST || raw.mEvent == OT_SIM_EVENT_IP6_FROM_HOST)
-            {
-                queue_host_msg(&raw);
-            }
-            pacer_time = now + raw.mDelay;
+            pending_ev   = raw;
+            have_pending = true;
+            pacer_time   = now + raw.mDelay;
             return;
         }
 
-        if (raw.mDelay == 0)
+        deliver_event(&raw);
+        if (!event_is_for_embedded(raw.mEvent))
         {
-            struct otns_radio_event ev;
-
-            parse_radio_event(&ev, &raw);
-            deliver_to_embedded(&ev);
-            continue;
+            pacer_time = now;
+            return;
         }
-
-        parse_radio_event(&pending_ev, &raw);
-        have_pending = true;
-        pacer_time   = now + raw.mDelay;
-        return;
     }
 }
 
@@ -1427,6 +1451,8 @@ void nsi_otns_bottom_set_own_addr(const uint8_t *short_addr, const uint8_t *ext_
     memcpy(own_short_addr, short_addr, SHORT_ADDR_SIZE);
     memcpy(own_ext_addr, ext_addr_le, OT_EXT_ADDRESS_SIZE);
 }
+
+void nsi_otns_bottom_set_pan_id(uint16_t pan_id) { own_pan_id = pan_id; }
 
 void nsi_otns_bottom_send_status(const char *status, uint16_t len)
 {

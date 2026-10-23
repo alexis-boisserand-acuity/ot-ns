@@ -127,6 +127,7 @@ struct frame_addr_info
     uint8_t  seq;
     int      dst_mode;
     int      dst_off;
+    bool     dst_broadcast;
     bool     dst_pan_present;
     uint16_t dst_pan;
     int      src_mode;
@@ -150,6 +151,7 @@ bool frame_is_for_me(const uint8_t *psdu, uint16_t len, struct frame_addr_info *
 bool frame_addr_matches(const uint8_t          *psdu,
                         uint16_t                len,
                         struct frame_addr_info *info,
+                        uint16_t                pan_id,
                         const uint8_t          *own_short_addr,
                         const uint8_t          *own_ext_addr);
 bool frame_is_ack(const uint8_t *psdu, uint16_t len);

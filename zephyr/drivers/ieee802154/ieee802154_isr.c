@@ -92,11 +92,9 @@ static void deliver_rx(const struct otns_radio_event *ev, bool acked_with_fpb, c
     net_pkt_set_ieee802154_lqi(pkt, LQI_PERFECT);
     net_pkt_set_ieee802154_rssi_dbm(pkt, ev->data.mPower);
     net_pkt_set_ieee802154_ack_fpb(pkt, acked_with_fpb);
-#if defined(CONFIG_NET_L2_OPENTHREAD)
     net_pkt_set_ieee802154_ack_seb(pkt, security != NULL && security->secured);
     net_pkt_set_ieee802154_ack_keyid(pkt, security != NULL ? security->key_id : 0);
     net_pkt_set_ieee802154_ack_fc(pkt, security != NULL ? security->frame_counter : 0);
-#endif
     net_pkt_set_timestamp_ns(pkt, ev->timestamp_us * NSEC_PER_USEC);
 
     if (net_recv_data(data.iface, pkt) < 0)
@@ -133,7 +131,12 @@ static void handle_rx_done(const struct otns_radio_event *ev)
     struct frame_addr_info info;
     bool                   for_me = frame_is_for_me(ev->psdu, ev->psdu_len, &info);
 
-    if (for_me && (info.fcf & FCF_ACK_REQ_BIT))
+    if (!for_me)
+    {
+        return;
+    }
+
+    if (info.dst_off != FRAME_OFF_NONE && !info.dst_broadcast && (info.fcf & FCF_ACK_REQ_BIT))
     {
         struct ack_security_info security;
         bool                     scheduled = schedule_ack(ev->psdu, ev->psdu_len, ev->data.mPower, &info, &security);
@@ -208,8 +211,6 @@ void isr(const void *arg)
     struct otns_radio_event ev;
 
     ARG_UNUSED(arg);
-
-    otns_apply_pending_drift_offset();
 
     if (nsi_otns_bottom_host_msg_pending())
     {

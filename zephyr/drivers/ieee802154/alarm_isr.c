@@ -69,7 +69,10 @@ static void alarm_micro_isr(const void *arg)
     otSysEventSignalPending();
 }
 
-static uint32_t alarm_milli_get_now(void) { return (uint32_t)(nsi_otns_bottom_get_time_us() / 1000) - time_offset_ms; }
+static uint32_t alarm_milli_get_now(void)
+{
+    return (uint32_t)(nsi_otns_bottom_get_time_us() / 1000) - time_offset_ms - nsi_otns_bottom_get_drift_offset_ms();
+}
 
 static uint32_t alarm_micro_get_now(void) { return (uint32_t)nsi_otns_bottom_get_time_us() - time_offset_us; }
 
@@ -86,18 +89,6 @@ void     __wrap_otPlatAlarmMicroStop(otInstance *aInstance);
 void     __wrap_alarm_milli_set_time_offset_ms(int32_t offset_ms);
 
 void __wrap_alarm_milli_set_time_offset_ms(int32_t offset_ms) { time_offset_ms = offset_ms; }
-
-void otns_apply_pending_drift_offset(void)
-{
-    static int32_t last_offset_ms;
-    int32_t        offset_ms = nsi_otns_bottom_get_drift_offset_ms();
-
-    if (offset_ms != last_offset_ms)
-    {
-        last_offset_ms = offset_ms;
-        __wrap_alarm_milli_set_time_offset_ms(offset_ms);
-    }
-}
 
 uint32_t __wrap_otPlatAlarmMilliGetNow(void) { return alarm_milli_get_now(); }
 
@@ -133,9 +124,13 @@ void __wrap_platformAlarmMilliProcess(otInstance *aInstance)
     otns_host_forward_process(aInstance);
 #endif
 
-    if (milli_fired)
+    unsigned int key   = irq_lock();
+    bool         fired = milli_fired;
+
+    milli_fired = false;
+    irq_unlock(key);
+    if (fired)
     {
-        milli_fired = false;
 #if defined(CONFIG_OPENTHREAD_DIAG)
         if (otPlatDiagModeGet())
         {
@@ -158,9 +153,13 @@ void __wrap_platformAlarmMicroProcess(otInstance *aInstance)
      * underlying Kconfig symbol instead, which is globally available via autoconf.h.
      */
 #if defined(CONFIG_OPENTHREAD_PLATFORM_USEC_TIMER)
-    if (micro_fired)
+    unsigned int key   = irq_lock();
+    bool         fired = micro_fired;
+
+    micro_fired = false;
+    irq_unlock(key);
+    if (fired)
     {
-        micro_fired = false;
         otPlatAlarmMicroFired(aInstance);
     }
 #else
@@ -172,6 +171,10 @@ void __wrap_otPlatAlarmMilliStartAt(otInstance *aInstance, uint32_t aT0, uint32_
 {
     ARG_UNUSED(aInstance);
 
+    unsigned int key = irq_lock();
+
+    nsi_otns_bottom_alarm_cancel_milli();
+    milli_fired   = false;
     int32_t delta = (int32_t)(aT0 + aDt - alarm_milli_get_now());
 
     if (delta > 0)
@@ -180,22 +183,30 @@ void __wrap_otPlatAlarmMilliStartAt(otInstance *aInstance, uint32_t aT0, uint32_
     }
     else
     {
-        nsi_otns_bottom_alarm_cancel_milli();
         alarm_milli_isr(NULL);
     }
+    irq_unlock(key);
 }
 
 void __wrap_otPlatAlarmMilliStop(otInstance *aInstance)
 {
     ARG_UNUSED(aInstance);
 
+    unsigned int key = irq_lock();
+
     nsi_otns_bottom_alarm_cancel_milli();
+    milli_fired = false;
+    irq_unlock(key);
 }
 
 void __wrap_otPlatAlarmMicroStartAt(otInstance *aInstance, uint32_t aT0, uint32_t aDt)
 {
     ARG_UNUSED(aInstance);
 
+    unsigned int key = irq_lock();
+
+    nsi_otns_bottom_alarm_cancel_micro();
+    micro_fired   = false;
     int32_t delta = (int32_t)(aT0 + aDt - alarm_micro_get_now());
 
     if (delta > 0)
@@ -204,14 +215,18 @@ void __wrap_otPlatAlarmMicroStartAt(otInstance *aInstance, uint32_t aT0, uint32_
     }
     else
     {
-        nsi_otns_bottom_alarm_cancel_micro();
         alarm_micro_isr(NULL);
     }
+    irq_unlock(key);
 }
 
 void __wrap_otPlatAlarmMicroStop(otInstance *aInstance)
 {
     ARG_UNUSED(aInstance);
 
+    unsigned int key = irq_lock();
+
     nsi_otns_bottom_alarm_cancel_micro();
+    micro_fired = false;
+    irq_unlock(key);
 }

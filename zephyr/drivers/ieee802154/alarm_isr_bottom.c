@@ -70,6 +70,7 @@ void nsi_otns_bottom_alarm_set_milli_at(uint64_t at_us)
 void nsi_otns_bottom_alarm_cancel_milli(void)
 {
     alarm_time_milli_us = NSI_NEVER;
+    hw_irq_ctrl_clear_irq(IEEE802154_OTNS_ALARM_MILLI_IRQ);
     nsi_hws_find_next_event();
 }
 
@@ -82,5 +83,6 @@ void nsi_otns_bottom_alarm_set_micro_at(uint64_t at_us)
 void nsi_otns_bottom_alarm_cancel_micro(void)
 {
     alarm_time_micro_us = NSI_NEVER;
+    hw_irq_ctrl_clear_irq(IEEE802154_OTNS_ALARM_MICRO_IRQ);
     nsi_hws_find_next_event();
 }

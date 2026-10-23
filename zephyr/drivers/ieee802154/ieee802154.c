@@ -219,6 +219,7 @@ static int filter(const struct device            *dev,
         return 0;
     case IEEE802154_FILTER_TYPE_PAN_ID:
         sys_put_le16(filter->pan_id, data.pan_id);
+        nsi_otns_bottom_set_pan_id(filter->pan_id);
         irq_unlock(key);
         return 0;
     default:

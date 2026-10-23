@@ -91,7 +91,7 @@ uint16_t crc16(const uint8_t *data, size_t len)
 
 bool frame_is_for_me(const uint8_t *psdu, uint16_t len, struct frame_addr_info *info)
 {
-    return frame_addr_matches(psdu, len, info, data.short_addr, data.ext_addr);
+    return frame_addr_matches(psdu, len, info, sys_get_le16(data.pan_id), data.short_addr, data.ext_addr);
 }
 
 /* ------------------------------------------------------------------------- */

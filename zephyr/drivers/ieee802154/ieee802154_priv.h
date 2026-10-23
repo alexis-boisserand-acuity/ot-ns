@@ -90,6 +90,8 @@ void nsi_otns_bottom_send_ext_addr(const uint8_t *ext_addr_be);
 
 void nsi_otns_bottom_set_own_addr(const uint8_t *short_addr, const uint8_t *ext_addr);
 
+void nsi_otns_bottom_set_pan_id(uint16_t pan_id);
+
 void nsi_otns_bottom_send_status(const char *status, uint16_t len);
 
 void nsi_otns_bottom_send_msg_to_host(uint8_t type, const uint8_t *data, uint16_t len);
@@ -115,8 +117,6 @@ void nsi_otns_bottom_alarm_cancel_milli(void);
 void nsi_otns_bottom_alarm_set_micro_at(uint64_t at_us);
 
 void nsi_otns_bottom_alarm_cancel_micro(void);
-
-void otns_apply_pending_drift_offset(void);
 
 struct otInstance;
 

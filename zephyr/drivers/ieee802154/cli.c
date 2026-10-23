@@ -100,8 +100,6 @@ static void isr(const void *arg)
     uint8_t buf[INPUT_CHUNK_MAX];
     size_t  n;
 
-    otns_apply_pending_drift_offset();
-
     while ((n = nsi_otns_cli_get_input(buf, sizeof(buf))) > 0)
     {
         for (size_t i = 0; i < n; i++)
