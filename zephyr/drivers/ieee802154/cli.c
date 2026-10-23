@@ -93,6 +93,12 @@ static int cli_output_cb(void *context, const char *format, va_list arg)
     return len;
 }
 
+static void echo_line(const char *text)
+{
+    nsi_otns_cli_output((const uint8_t *)text, strlen(text));
+    nsi_otns_cli_output((const uint8_t *)"\r\n", 2);
+}
+
 static void isr(const void *arg)
 {
     ARG_UNUSED(arg);
@@ -183,11 +189,13 @@ static void thread_fn(void *a, void *b, void *c)
             nsi_exit(0);
         }
 
+        openthread_mutex_lock();
+        echo_line(line.buf);
+
 #ifdef CONFIG_IEEE802154_OTNS_CLI_LEGACY_CSL_PERIOD
         translate_legacy_csl_period(&line);
 #endif
 
-        openthread_mutex_lock();
         otCliInputLine(line.buf);
         openthread_mutex_unlock();
     }
