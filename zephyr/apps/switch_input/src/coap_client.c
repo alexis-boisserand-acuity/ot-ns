@@ -37,7 +37,6 @@ LOG_MODULE_REGISTER(coap_client_app, LOG_LEVEL_INF);
 #include <zephyr/net/coap_client.h>
 #include <zephyr/net/socket.h>
 #include <zephyr/posix/arpa/inet.h>
-#include <zephyr/posix/sys/socket.h>
 
 #include "coap_client.h"
 #include "switch_light_protocol.h"
@@ -50,7 +49,7 @@ static int                sock = -1;
 
 void switch_coap_init(void)
 {
-    sock = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
+    sock = zsock_socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
     if (sock < 0)
     {
         LOG_ERR("Failed to create CoAP client socket: %d", errno);
@@ -97,7 +96,7 @@ void switch_input_send_command(enum light_cmd cmd)
     }
 
     payload = (uint8_t)cmd;
-    inet_pton(AF_INET6, LIGHT_COAP_MULTICAST_ADDR, &addr.sin6_addr);
+    zsock_inet_pton(AF_INET6, LIGHT_COAP_MULTICAST_ADDR, &addr.sin6_addr);
 
     int ret = coap_client_req(&client, sock, (struct sockaddr *)&addr, &req, NULL);
 
