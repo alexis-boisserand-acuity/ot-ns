@@ -6,11 +6,13 @@ This directory contains a Zephyr module providing an IEEE 802.15.4 driver for si
 
 This module requires a [Zephyr](https://github.com/zephyrproject-rtos/zephyr) workspace and SDK.
 
+You can run `zephyr/script/setup_zephyr_workspace` to automatically install a Zephyr reference workspace.
+
+Make sure you are in a Python environment with the `west` command available on `PATH`, and that the `ZEPHYR_BASE` environment variable points to your Zephyr installation.
+
 ## Zephyr-based equivalents of ot-rfsim executables
 
 ### Building
-
-Before running these scripts, make sure you are in a Python environment with the `west` command available on `PATH`, and that the `ZEPHYR_BASE` environment variable points to your Zephyr installation.
 
 As with `ot-rfsim`, there are several variant build scripts in [script](script/): `build_latest` (Thread 1.4), `build_v11`, `build_v12`, `build_v13`, and `build_br` (Border Router), plus `build_all` which builds all of them in one go:
 

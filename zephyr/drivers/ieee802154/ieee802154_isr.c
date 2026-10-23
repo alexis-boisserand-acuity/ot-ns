@@ -139,8 +139,8 @@ static void handle_rx_done(const struct otns_radio_event *ev)
     if (info.dst_off != FRAME_OFF_NONE && !info.dst_broadcast && (info.fcf & FCF_ACK_REQ_BIT))
     {
         struct ack_security_info security;
-        bool                     scheduled = schedule_ack(ev->psdu, ev->psdu_len, ev->data.mPower, &info, &security);
-        bool                     fpb       = scheduled && frame_pending_for(ev->psdu, ev->psdu_len, &info);
+        bool                     scheduled = schedule_ack(ev->psdu, ev->psdu_len, ev->data.mPower, &security);
+        bool                     fpb       = scheduled && frame_pending_for(ev->psdu, ev->psdu_len);
 
         deliver_rx(ev, fpb, scheduled ? &security : NULL);
     }

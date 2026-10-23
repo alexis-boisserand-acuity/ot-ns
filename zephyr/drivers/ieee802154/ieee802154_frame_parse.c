@@ -42,6 +42,20 @@
 
 #include "ieee802154_frame.h"
 
+#define SEQ_NUM_SIZE 1
+#define FCF_FRAME_TYPE_ACK 0x0002
+#define FCF_PAN_COMPR_BIT 0x0040
+#define FCF_DST_MODE_MASK 0x0c00
+#define FCF_DST_MODE_SHIFT 10
+#define FCF_SRC_MODE_MASK 0xc000
+#define FCF_SRC_MODE_SHIFT 14
+#define FCF_VERSION_MASK 0x3000
+#define FCF_VERSION_SHIFT 12
+#define FCF_SEQ_SUPPR_BIT 0x0100
+#define IEEE802154_VERSION_2015 2
+
+#define ADDR_MODE_NONE 0
+
 static inline uint16_t frame_le16(const uint8_t *p) { return (uint16_t)p[0] | ((uint16_t)p[1] << 8); }
 
 static bool dst_pan_id_present_2015(uint8_t dst_mode, uint8_t src_mode, bool pc)

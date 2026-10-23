@@ -12,6 +12,14 @@ if(CONFIG_IEEE802154_OTNS)
   zephyr_library_sources(${otns_drv_dir}/alarm_isr.c)
   zephyr_library_sources(${otns_drv_dir}/cli.c)
   zephyr_library_sources(${otns_drv_dir}/radio_cca.c)
+
+  get_filename_component(otns_dir ${CMAKE_CURRENT_SOURCE_DIR}/.. ABSOLUTE)
+  set(ot_dir ${otns_dir}/openthread)
+  zephyr_library_sources(${ot_dir}/examples/platforms/utils/mac_frame.cpp)
+  set_source_files_properties(${ot_dir}/examples/platforms/utils/mac_frame.cpp
+    PROPERTIES INCLUDE_DIRECTORIES "${ot_dir}/src;${ot_dir}/examples/platforms/utils")
+  zephyr_library_include_directories(${ot_dir}/src/core)
+  target_link_libraries(${ZEPHYR_CURRENT_LIBRARY} PRIVATE ot-config)
   zephyr_library_sources_ifdef(CONFIG_OPENTHREAD_BORDER_ROUTING ${otns_drv_dir}/infra_if.c)
   if(CONFIG_OPENTHREAD_BORDER_ROUTING AND CONFIG_OPENTHREAD_UDP_FORWARD)
     zephyr_library_sources(${otns_drv_dir}/host_forward.c)
@@ -37,20 +45,20 @@ if(CONFIG_IEEE802154_OTNS)
   endif()
 
   zephyr_include_directories(${otns_drv_dir})
-  zephyr_include_directories(${CMAKE_CURRENT_SOURCE_DIR}/..)
-  zephyr_include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../ot-rfsim/src)
+  zephyr_include_directories(${otns_dir})
+  zephyr_include_directories(${otns_dir}/ot-rfsim/src)
 
   target_compile_options(native_simulator BEFORE INTERFACE
     -I${otns_drv_dir}
-    -I${CMAKE_CURRENT_SOURCE_DIR}/..
-    -I${CMAKE_CURRENT_SOURCE_DIR}/../openthread/include
-    -I${CMAKE_CURRENT_SOURCE_DIR}/../openthread/src/core
-    -I${CMAKE_CURRENT_SOURCE_DIR}/../openthread/src
-    -I${CMAKE_CURRENT_SOURCE_DIR}/../ot-rfsim/src
+    -I${otns_dir}
+    -I${otns_dir}/openthread/include
+    -I${otns_dir}/openthread/src/core
+    -I${otns_dir}/openthread/src
+    -I${otns_dir}/ot-rfsim/src
     -DOPENTHREAD_PROJECT_CORE_CONFIG_FILE=\\\"openthread-core-rfsim-config.h\\\"
   )
   target_sources(native_simulator INTERFACE ${otns_drv_dir}/ieee802154_bottom.c)
-  target_sources(native_simulator INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/../ot-rfsim/src/event-sim.c)
+  target_sources(native_simulator INTERFACE ${otns_dir}/ot-rfsim/src/event-sim.c)
   target_sources(native_simulator INTERFACE ${otns_drv_dir}/event_sim_ref.c)
   target_sources(native_simulator INTERFACE ${otns_drv_dir}/ieee802154_frame_parse.c)
   target_sources(native_simulator INTERFACE ${otns_drv_dir}/alarm_isr_bottom.c)

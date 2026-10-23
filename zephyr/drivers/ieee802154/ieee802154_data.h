@@ -42,6 +42,34 @@
 
 #define LQI_PERFECT 255
 
+#define MAX_ACK_IES 4
+#define ACK_IE_MAX_CONTENT (OT_ACK_IE_MAX_SIZE - 2)
+
+#define MAX_FPB_ENTRIES 32
+
+#define MAX_MAC_KEYS 3
+#define MAC_KEY_SIZE 16
+
+struct mac_key_entry
+{
+    bool    valid;
+    uint8_t key_id_mode;
+    uint8_t key_id;
+    uint8_t key[MAC_KEY_SIZE];
+};
+
+struct enh_ack_ie
+{
+    bool     valid;
+    uint8_t  element_id;
+    uint8_t  content_len;
+    uint8_t  content[ACK_IE_MAX_CONTENT];
+    bool     has_short_filter;
+    uint16_t short_addr;
+    bool     has_ext_filter;
+    uint8_t  ext_addr_be[OT_EXT_ADDRESS_SIZE];
+};
+
 struct radio_data
 {
     struct net_if *iface;

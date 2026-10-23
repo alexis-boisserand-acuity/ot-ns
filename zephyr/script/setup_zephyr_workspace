@@ -7,7 +7,7 @@ OTNS_ROOT="$(cd "${ZEPHYR_SRCDIR}/.." && pwd)"
 readonly ZEPHYR_SRCDIR
 readonly OTNS_ROOT
 
-readonly ZEPHYR_REV="1405adc9a6042353ff791573d913fa6b202580a6"
+readonly ZEPHYR_REV="v4.5.0-rc3"
 
 check_prereqs()
 {

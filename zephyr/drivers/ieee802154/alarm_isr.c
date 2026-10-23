@@ -148,10 +148,6 @@ void __wrap_platformAlarmMilliProcess(otInstance *aInstance)
 
 void __wrap_platformAlarmMicroProcess(otInstance *aInstance)
 {
-    /* OPENTHREAD_CONFIG_PLATFORM_USEC_TIMER_ENABLE isn't visible here (it comes from
-     * OPENTHREAD_PROJECT_CORE_CONFIG_FILE, only applied within modules/openthread/); use the
-     * underlying Kconfig symbol instead, which is globally available via autoconf.h.
-     */
 #if defined(CONFIG_OPENTHREAD_PLATFORM_USEC_TIMER)
     unsigned int key   = irq_lock();
     bool         fired = micro_fired;
