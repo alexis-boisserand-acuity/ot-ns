@@ -41,8 +41,9 @@ LOG_MODULE_REGISTER(coap_client_app, LOG_LEVEL_INF);
 #include "coap_client.h"
 #include "switch_light_protocol.h"
 
-/* RFC 7967 No-Response value suppressing replies for all response classes. */
 #define NO_RESPONSE_SUPPRESS_ALL 0x1A
+
+#define MULTICAST_HOP_LIMIT 16
 
 static struct coap_client client;
 static int                sock = -1;
@@ -56,7 +57,15 @@ void switch_coap_init(void)
         return;
     }
 
-    int ret = coap_client_init(&client, NULL);
+    int hops = MULTICAST_HOP_LIMIT;
+    int ret  = zsock_setsockopt(sock, IPPROTO_IPV6, IPV6_MULTICAST_HOPS, &hops, sizeof(hops));
+
+    if (ret)
+    {
+        LOG_ERR("Failed to set CoAP multicast hop limit: %d", errno);
+    }
+
+    ret = coap_client_init(&client, NULL);
 
     if (ret)
     {
