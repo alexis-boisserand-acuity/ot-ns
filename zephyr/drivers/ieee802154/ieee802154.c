@@ -56,6 +56,7 @@ LOG_MODULE_REGISTER(LOG_MODULE_NAME);
 #include <zephyr/net/net_pkt.h>
 #include <zephyr/net/openthread.h>
 #include <zephyr/sys/byteorder.h>
+#include <zephyr/sys/crc.h>
 
 #include "ieee802154_data.h"
 #include "ieee802154_frame.h"
@@ -102,18 +103,20 @@ static int energy_scan(const struct device *dev, uint16_t duration, energy_scan_
     {
         return -EIO;
     }
-    if (data.ed_scan_pending)
+    if (done_cb == NULL)
+    {
+        return -EINVAL;
+    }
+    if (data.ed_done_cb != NULL)
     {
         return -EBUSY;
     }
 
-    data.ed_scan_pending = true;
-    data.ed_done_cb      = done_cb;
+    data.ed_done_cb = done_cb;
 
-    if (nsi_otns_bottom_energy_scan(data.channel, duration) < 0)
+    if (nsi_otns_bottom_energy_scan(duration) < 0)
     {
-        data.ed_scan_pending = false;
-        data.ed_done_cb      = NULL;
+        data.ed_done_cb = NULL;
         return -EIO;
     }
 
@@ -127,9 +130,8 @@ static void radio_wake(void)
         return;
     }
 
-    data.started       = true;
-    data.sleep_pending = false;
-    nsi_otns_bottom_set_state(OT_RADIO_STATE_RECEIVE, data.channel);
+    data.started = true;
+    nsi_otns_bottom_set_state(OT_RADIO_STATE_RECEIVE);
 }
 
 static int cca(const struct device *dev)
@@ -146,7 +148,7 @@ static int cca(const struct device *dev)
     k_sem_reset(&data.cca_wait);
     data.cca_channel_free = true;
 
-    if (nsi_otns_bottom_cca(data.channel) < 0)
+    if (nsi_otns_bottom_cca() < 0)
     {
         return -EIO;
     }
@@ -169,12 +171,12 @@ static int set_channel(const struct device *dev, uint16_t channel)
     }
 
     unsigned int key = irq_lock();
-    data.channel     = (uint8_t)channel;
+    nsi_otns_bottom_set_channel((uint8_t)channel);
     irq_unlock(key);
 
     if (data.started)
     {
-        nsi_otns_bottom_set_state(OT_RADIO_STATE_RECEIVE, data.channel);
+        nsi_otns_bottom_set_state(OT_RADIO_STATE_RECEIVE);
     }
 
     return 0;
@@ -197,27 +199,20 @@ static int filter(const struct device            *dev,
     switch (type)
     {
     case IEEE802154_FILTER_TYPE_IEEE_ADDR:
-    {
-        uint8_t ext_addr_be[OT_EXT_ADDRESS_SIZE];
-
-        memcpy(data.ext_addr, filter->ieee_addr, OT_EXT_ADDRESS_SIZE);
-
-        for (int i = 0; i < OT_EXT_ADDRESS_SIZE; i++)
-        {
-            ext_addr_be[i] = data.ext_addr[OT_EXT_ADDRESS_SIZE - 1 - i];
-        }
+        nsi_otns_bottom_set_ext_addr(filter->ieee_addr);
         irq_unlock(key);
-        nsi_otns_bottom_send_ext_addr(ext_addr_be);
-        nsi_otns_bottom_set_own_addr(data.short_addr, data.ext_addr);
+        nsi_otns_bottom_send_ext_addr();
+        return 0;
+    case IEEE802154_FILTER_TYPE_SHORT_ADDR:
+    {
+        uint8_t short_addr[SHORT_ADDR_SIZE];
+
+        sys_put_le16(filter->short_addr, short_addr);
+        nsi_otns_bottom_set_short_addr(short_addr);
+        irq_unlock(key);
         return 0;
     }
-    case IEEE802154_FILTER_TYPE_SHORT_ADDR:
-        sys_put_le16(filter->short_addr, data.short_addr);
-        irq_unlock(key);
-        nsi_otns_bottom_set_own_addr(data.short_addr, data.ext_addr);
-        return 0;
     case IEEE802154_FILTER_TYPE_PAN_ID:
-        sys_put_le16(filter->pan_id, data.pan_id);
         nsi_otns_bottom_set_pan_id(filter->pan_id);
         irq_unlock(key);
         return 0;
@@ -231,39 +226,8 @@ static int set_txpower(const struct device *dev, int16_t dbm)
 {
     ARG_UNUSED(dev);
 
-    unsigned int key = irq_lock();
-    data.txpower     = (int8_t)dbm;
-    irq_unlock(key);
-    nsi_otns_bottom_set_txpower(data.txpower);
+    nsi_otns_bottom_set_txpower((int8_t)dbm);
     return 0;
-}
-
-static void log_tx_frame(const uint8_t *psdu, uint16_t len)
-{
-    struct frame_addr_info tx_info;
-
-    if (!parse_frame(psdu, len, &tx_info) || tx_info.dst_off == FRAME_OFF_NONE)
-    {
-        return;
-    }
-
-    if (tx_info.dst_mode == ADDR_MODE_EXT)
-    {
-        uint8_t dst_ext_be[OT_EXT_ADDRESS_SIZE];
-
-        for (int i = 0; i < OT_EXT_ADDRESS_SIZE; i++)
-        {
-            dst_ext_be[i] = psdu[tx_info.dst_off + OT_EXT_ADDRESS_SIZE - 1 - i];
-        }
-        LOG_DBG("TX seq %u type %d -> ext %02x%02x%02x%02x%02x%02x%02x%02x", tx_info.seq,
-                tx_info.fcf & FCF_FRAME_TYPE_MASK, dst_ext_be[0], dst_ext_be[1], dst_ext_be[2], dst_ext_be[3],
-                dst_ext_be[4], dst_ext_be[5], dst_ext_be[6], dst_ext_be[7]);
-    }
-    else if (tx_info.dst_mode == ADDR_MODE_SHORT)
-    {
-        LOG_DBG("TX seq %u type %d -> short 0x%04x", tx_info.seq, tx_info.fcf & FCF_FRAME_TYPE_MASK,
-                sys_get_le16(&psdu[tx_info.dst_off]));
-    }
 }
 
 static int tx_check_preconditions(enum ieee802154_tx_mode mode, uint16_t len)
@@ -300,70 +264,45 @@ static int tx_build_psdu(struct net_pkt *pkt, struct net_buf *frag, uint16_t len
     }
 
     memcpy(frag->data, psdu, len);
-
-    uint16_t fcs = crc16(psdu, len);
-
-    psdu[len]     = fcs & 0xff;
-    psdu[len + 1] = fcs >> 8;
-
-    log_tx_frame(psdu, len);
+    sys_put_le16(crc16_ccitt(0, psdu, len), &psdu[len]);
 
     return 0;
 }
 
-static int tx_send_frame(const uint8_t *psdu, uint16_t air_len, bool cca)
-{
-    return nsi_otns_bottom_tx(data.channel, data.txpower, psdu, air_len, cca);
-}
-
-static int tx_wait_for_result(void)
-{
-    (void)k_sem_take(&data.tx_wait, K_FOREVER);
-    return data.tx_result;
-}
-
 static void tx_deliver_ack(void)
 {
-    struct net_pkt *ack_pkt;
-    uint16_t ack_mac_len = IS_ENABLED(CONFIG_IEEE802154_L2_PKT_INCL_FCS) ? data.ack_len : data.ack_len - FCS_SIZE;
+    struct net_pkt *ack_pkt = rx_pkt_new(data.rx_ack_psdu, data.rx_ack_len, 0, data.rx_ack_timestamp_us);
 
-    ack_pkt = net_pkt_rx_alloc_with_buffer(data.iface, ack_mac_len, NET_AF_UNSPEC, 0, K_NO_WAIT);
     if (ack_pkt == NULL)
     {
         return;
     }
 
-    if (net_pkt_write(ack_pkt, data.ack_psdu, ack_mac_len) == 0)
+    net_pkt_cursor_init(ack_pkt);
+    if (ieee802154_handle_ack(data.iface, ack_pkt) != NET_OK)
     {
-        net_pkt_set_ieee802154_lqi(ack_pkt, LQI_PERFECT);
-        net_pkt_set_ieee802154_rssi_dbm(ack_pkt, 0);
-        net_pkt_set_timestamp_ns(ack_pkt, data.ack_timestamp_us * NSEC_PER_USEC);
-        net_pkt_cursor_init(ack_pkt);
-        if (ieee802154_handle_ack(data.iface, ack_pkt) != NET_OK)
-        {
-            LOG_DBG("ACK not handled");
-        }
-        LOG_DBG("ACK for seq %u: fcf=0x%04x frame_pending=%d", data.tx_seq, sys_get_le16(data.ack_psdu),
-                (data.ack_psdu[0] & FCF_BYTE0_FRAME_PENDING_BIT) != 0);
+        LOG_DBG("ACK not handled");
     }
+    LOG_DBG("ACK for seq %u: fcf=0x%04x frame_pending=%d", data.rx_ack_psdu[SEQ_NUM_OFFSET],
+            sys_get_le16(data.rx_ack_psdu), (data.rx_ack_psdu[0] & FCF_BYTE0_FRAME_PENDING_BIT) != 0);
     net_pkt_unref(ack_pkt);
 }
 
-static int tx_await_outcome(void)
+static int tx_await_outcome(bool wants_ack)
 {
-    int rc = tx_wait_for_result();
+    (void)k_sem_take(&data.tx_wait, K_FOREVER);
 
-    if (rc != 0)
+    if (data.tx_result != 0)
     {
-        return rc;
+        return data.tx_result;
     }
 
-    if (!data.tx_wants_ack)
+    if (!wants_ack)
     {
         return 0;
     }
 
-    if (data.ack_len == 0)
+    if (data.rx_ack_len == 0)
     {
         return -ENOMSG;
     }
@@ -391,20 +330,19 @@ static int tx(const struct device *dev, enum ieee802154_tx_mode mode, struct net
         return rc;
     }
 
-    data.tx_wants_ack = (len >= 1) && (frag->data[0] & FCF_BYTE0_ACK_REQ_BIT);
-    data.tx_seq       = (len >= MIN_FRAME_SIZE) ? frag->data[SEQ_NUM_OFFSET] : 0;
-    data.ack_len      = 0;
-    data.tx_result    = 0;
+    bool wants_ack = (len >= 1) && (frag->data[0] & FCF_BYTE0_ACK_REQ_BIT);
+
+    data.rx_ack_len = 0;
+    data.tx_result  = 0;
 
     k_sem_reset(&data.tx_wait);
 
-    rc = tx_send_frame(psdu, len + FCS_SIZE, mode == IEEE802154_TX_MODE_CCA);
+    rc = nsi_otns_bottom_tx(psdu, len + FCS_SIZE, mode == IEEE802154_TX_MODE_CCA);
     if (rc == 0)
     {
-        rc = tx_await_outcome();
+        rc = tx_await_outcome(wants_ack);
     }
 
-    data.tx_wants_ack = false;
     return rc;
 }
 
@@ -433,19 +371,7 @@ static int stop(const struct device *dev)
 
     data.started = false;
 
-    unsigned int key         = irq_lock();
-    bool         ack_pending = data.ack_tx_pending;
-
-    if (ack_pending)
-    {
-        data.sleep_pending = true;
-    }
-    irq_unlock(key);
-
-    if (!ack_pending)
-    {
-        nsi_otns_bottom_set_state(OT_RADIO_STATE_SLEEP, data.channel);
-    }
+    nsi_otns_bottom_set_state(OT_RADIO_STATE_SLEEP);
 
     return 0;
 }
@@ -465,26 +391,7 @@ static int configure(const struct device *dev, enum ieee802154_config_type type,
         break;
 
     case IEEE802154_CONFIG_ACK_FPB:
-        if (config->ack_fpb.addr == NULL)
-        {
-            if (config->ack_fpb.extended)
-            {
-                fpb_ext_clear();
-            }
-            else
-            {
-                fpb_short_clear();
-            }
-        }
-        else if (config->ack_fpb.extended)
-        {
-            ret = config->ack_fpb.enabled ? fpb_ext_add(config->ack_fpb.addr) : fpb_ext_remove(config->ack_fpb.addr);
-        }
-        else
-        {
-            ret = config->ack_fpb.enabled ? fpb_short_add(sys_get_le16(config->ack_fpb.addr))
-                                          : fpb_short_remove(sys_get_le16(config->ack_fpb.addr));
-        }
+        ret = fpb_configure(config->ack_fpb.extended, config->ack_fpb.addr, config->ack_fpb.enabled);
         break;
 
     case IEEE802154_CONFIG_CSL_PERIOD:
@@ -551,7 +458,7 @@ static void get_mac(void)
 static void iface_init(struct net_if *iface)
 {
     get_mac();
-    memcpy(data.ext_addr, data.mac_addr, OT_EXT_ADDRESS_SIZE);
+    nsi_otns_bottom_set_ext_addr(data.mac_addr);
 
     net_if_set_link_addr(iface, data.mac_addr, OT_EXT_ADDRESS_SIZE, NET_LINK_IEEE802154);
 
@@ -567,10 +474,6 @@ static int init(const struct device *dev)
 
     k_sem_init(&data.tx_wait, 0, 1);
     k_sem_init(&data.cca_wait, 0, 1);
-
-    data.channel = kMinChannel;
-    data.txpower = 0;
-    data.started = false;
 
     IRQ_CONNECT(IEEE802154_OTNS_IRQ, 0, isr, NULL, 0);
     irq_enable(IEEE802154_OTNS_IRQ);

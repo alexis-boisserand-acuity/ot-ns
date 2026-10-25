@@ -66,17 +66,21 @@ bool nsi_otns_bottom_is_connected(void);
 
 bool nsi_otns_bottom_is_configured(void);
 
-int nsi_otns_bottom_tx(uint8_t channel, int8_t power, const uint8_t *psdu, uint16_t len, bool cca);
+int nsi_otns_bottom_tx(const uint8_t *psdu, uint16_t len, bool cca);
 
-int nsi_otns_bottom_tx_after(uint8_t channel, int8_t power, const uint8_t *psdu, uint16_t len, uint32_t delay_us);
+int nsi_otns_bottom_tx_after(const uint8_t *psdu, uint16_t len, uint32_t delay_us);
 
 int nsi_otns_bottom_update_ack(const uint8_t *psdu, uint16_t len);
 
-int nsi_otns_bottom_cca(uint8_t channel);
+int nsi_otns_bottom_cca(void);
 
-int nsi_otns_bottom_energy_scan(uint8_t channel, uint16_t duration_ms);
+int nsi_otns_bottom_energy_scan(uint16_t duration_ms);
 
-void nsi_otns_bottom_set_state(uint8_t state, uint8_t channel);
+void nsi_otns_bottom_set_channel(uint8_t channel);
+
+uint8_t nsi_otns_bottom_get_channel(void);
+
+void nsi_otns_bottom_set_state(uint8_t state);
 
 void nsi_otns_bottom_set_txpower(int8_t power);
 
@@ -86,11 +90,15 @@ void nsi_otns_bottom_set_cca_threshold(int8_t threshold);
 
 void nsi_otns_bottom_send_uart(const uint8_t *buf, uint16_t len);
 
-void nsi_otns_bottom_send_ext_addr(const uint8_t *ext_addr_be);
+void nsi_otns_bottom_set_short_addr(const uint8_t *short_addr);
 
-void nsi_otns_bottom_set_own_addr(const uint8_t *short_addr, const uint8_t *ext_addr);
+void nsi_otns_bottom_set_ext_addr(const uint8_t *ext_addr);
+
+void nsi_otns_bottom_get_ext_addr(uint8_t *ext_addr);
 
 void nsi_otns_bottom_set_pan_id(uint16_t pan_id);
+
+void nsi_otns_bottom_send_ext_addr(void);
 
 void nsi_otns_bottom_send_status(const char *status, uint16_t len);
 
@@ -110,13 +118,16 @@ uint8_t nsi_otns_bottom_get_csl_accuracy(void);
 
 uint64_t nsi_otns_bottom_get_time_us(void);
 
-void nsi_otns_bottom_alarm_set_milli_at(uint64_t at_us);
+enum otns_alarm
+{
+    OTNS_ALARM_MILLI,
+    OTNS_ALARM_MICRO,
+    OTNS_ALARM_COUNT,
+};
 
-void nsi_otns_bottom_alarm_cancel_milli(void);
+void nsi_otns_bottom_alarm_set_at(enum otns_alarm alarm, uint64_t at_us);
 
-void nsi_otns_bottom_alarm_set_micro_at(uint64_t at_us);
-
-void nsi_otns_bottom_alarm_cancel_micro(void);
+void nsi_otns_bottom_alarm_cancel(enum otns_alarm alarm);
 
 struct otInstance;
 

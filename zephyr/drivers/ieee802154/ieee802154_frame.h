@@ -74,10 +74,15 @@ struct ack_security_info
     uint32_t frame_counter;
 };
 
-uint16_t crc16(const uint8_t *data, size_t len);
+static inline void ext_addr_reverse(uint8_t *dst, const uint8_t *src)
+{
+    for (int i = 0; i < OT_EXT_ADDRESS_SIZE; i++)
+    {
+        dst[i] = src[OT_EXT_ADDRESS_SIZE - 1 - i];
+    }
+}
 
 bool parse_frame(const uint8_t *psdu, uint16_t len, struct frame_addr_info *info);
-bool frame_is_for_me(const uint8_t *psdu, uint16_t len, struct frame_addr_info *info);
 
 bool frame_addr_matches(const uint8_t          *psdu,
                         uint16_t                len,
@@ -90,12 +95,7 @@ bool frame_is_ack_requested(const uint8_t *psdu, uint16_t len);
 
 bool frame_pending_for(const uint8_t *psdu, uint16_t len);
 
-int  fpb_short_add(uint16_t addr);
-int  fpb_short_remove(uint16_t addr);
-void fpb_short_clear(void);
-int  fpb_ext_add(const uint8_t *addr);
-int  fpb_ext_remove(const uint8_t *addr);
-void fpb_ext_clear(void);
+int fpb_configure(bool extended, const uint8_t *addr, bool enabled);
 
 bool schedule_ack(const uint8_t *rx_psdu, uint16_t rx_len, int8_t rssi, struct ack_security_info *security);
 

@@ -90,23 +90,28 @@ static bool should_forward_to_host(const otMessage *aMessage, const struct MsgTo
            mcast_scope(aInfo->mDstIp6) >= 0x4;
 }
 
+static void send_to_host(uint8_t type, const struct MsgToHostEventData *info, const otMessage *aMessage)
+{
+    uint16_t msgLen = otMessageGetLength(aMessage);
+
+    if (msgLen > OTNS_HOST_MAX_DATAGRAM_LEN)
+    {
+        LOG_WRN("Datagram too large for host (%u bytes)", msgLen);
+        return;
+    }
+
+    memcpy(s_host_buf, info, sizeof(*info));
+    (void)otMessageRead(aMessage, 0, s_host_buf + sizeof(*info), msgLen);
+    nsi_otns_bottom_send_msg_to_host(type, s_host_buf, sizeof(*info) + msgLen);
+}
+
 static void forward_ip6_to_host(otMessage *aMessage)
 {
     struct MsgToHostEventData info;
-    uint16_t                  msgLen = otMessageGetLength(aMessage);
 
     if (parse_ip6(aMessage, &info) && should_forward_to_host(aMessage, &info))
     {
-        if (msgLen <= OTNS_HOST_MAX_DATAGRAM_LEN)
-        {
-            memcpy(s_host_buf, &info, sizeof(info));
-            (void)otMessageRead(aMessage, 0, s_host_buf + sizeof(info), msgLen);
-            nsi_otns_bottom_send_msg_to_host(OT_SIM_EVENT_IP6_TO_HOST, s_host_buf, sizeof(info) + msgLen);
-        }
-        else
-        {
-            LOG_WRN("IPv6 datagram too large for host (%u bytes)", msgLen);
-        }
+        send_to_host(OT_SIM_EVENT_IP6_TO_HOST, &info, aMessage);
     }
 }
 
@@ -143,24 +148,13 @@ static void handle_udp_to_host(otMessage    *aMessage,
                                void         *aContext)
 {
     struct MsgToHostEventData info;
-    uint16_t                  msgLen = otMessageGetLength(aMessage);
 
     info.mSrcPort = aSockPort;
     info.mDstPort = aPeerPort;
     memset(info.mSrcIp6, 0, sizeof(info.mSrcIp6));
     memcpy(info.mDstIp6, aPeerAddr, OT_IP6_ADDRESS_SIZE);
 
-    if (msgLen <= OTNS_HOST_MAX_DATAGRAM_LEN)
-    {
-        memcpy(s_host_buf, &info, sizeof(info));
-        (void)otMessageRead(aMessage, 0, s_host_buf + sizeof(info), msgLen);
-        nsi_otns_bottom_send_msg_to_host(OT_SIM_EVENT_UDP_TO_HOST, s_host_buf, sizeof(info) + msgLen);
-    }
-    else
-    {
-        LOG_WRN("UDP message too large for host (%u bytes)", msgLen);
-    }
-
+    send_to_host(OT_SIM_EVENT_UDP_TO_HOST, &info, aMessage);
     otMessageFree(aMessage);
 }
 

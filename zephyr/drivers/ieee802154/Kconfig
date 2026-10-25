@@ -9,6 +9,7 @@ config IEEE802154_OTNS
 	select SHELL
 	select OPENTHREAD_SHELL
 	select NET_PKT_TIMESTAMP
+	select CRC
 	help
 	  Virtual IEEE 802.15.4 radio driver for the native_sim board that
 	  connects to the OpenThread Network Simulator (OTNS) over a Unix domain

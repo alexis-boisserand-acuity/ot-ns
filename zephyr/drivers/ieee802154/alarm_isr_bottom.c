@@ -44,45 +44,40 @@
 static uint64_t alarm_time_milli_us = NSI_NEVER;
 static uint64_t alarm_time_micro_us = NSI_NEVER;
 
-static void alarm_milli_timer_fired(void)
+static uint64_t *const alarm_time_us[OTNS_ALARM_COUNT] = {
+    [OTNS_ALARM_MILLI] = &alarm_time_milli_us,
+    [OTNS_ALARM_MICRO] = &alarm_time_micro_us,
+};
+
+static const unsigned int alarm_irq[OTNS_ALARM_COUNT] = {
+    [OTNS_ALARM_MILLI] = IEEE802154_OTNS_ALARM_MILLI_IRQ,
+    [OTNS_ALARM_MICRO] = IEEE802154_OTNS_ALARM_MICRO_IRQ,
+};
+
+static void alarm_timer_fired(enum otns_alarm alarm)
 {
-    alarm_time_milli_us = NSI_NEVER;
-    hw_irq_ctrl_raise_im(IEEE802154_OTNS_ALARM_MILLI_IRQ);
+    *alarm_time_us[alarm] = NSI_NEVER;
+    hw_irq_ctrl_raise_im(alarm_irq[alarm]);
 }
 
-static void alarm_micro_timer_fired(void)
-{
-    alarm_time_micro_us = NSI_NEVER;
-    hw_irq_ctrl_raise_im(IEEE802154_OTNS_ALARM_MICRO_IRQ);
-}
+static void alarm_milli_timer_fired(void) { alarm_timer_fired(OTNS_ALARM_MILLI); }
+
+static void alarm_micro_timer_fired(void) { alarm_timer_fired(OTNS_ALARM_MICRO); }
 
 NSI_HW_EVENT(alarm_time_milli_us, alarm_milli_timer_fired, 942);
 NSI_HW_EVENT(alarm_time_micro_us, alarm_micro_timer_fired, 944);
 
 uint64_t nsi_otns_bottom_get_time_us(void) { return nsi_hws_get_time(); }
 
-void nsi_otns_bottom_alarm_set_milli_at(uint64_t at_us)
+void nsi_otns_bottom_alarm_set_at(enum otns_alarm alarm, uint64_t at_us)
 {
-    alarm_time_milli_us = at_us;
+    *alarm_time_us[alarm] = at_us;
     nsi_hws_find_next_event();
 }
 
-void nsi_otns_bottom_alarm_cancel_milli(void)
+void nsi_otns_bottom_alarm_cancel(enum otns_alarm alarm)
 {
-    alarm_time_milli_us = NSI_NEVER;
-    hw_irq_ctrl_clear_irq(IEEE802154_OTNS_ALARM_MILLI_IRQ);
-    nsi_hws_find_next_event();
-}
-
-void nsi_otns_bottom_alarm_set_micro_at(uint64_t at_us)
-{
-    alarm_time_micro_us = at_us;
-    nsi_hws_find_next_event();
-}
-
-void nsi_otns_bottom_alarm_cancel_micro(void)
-{
-    alarm_time_micro_us = NSI_NEVER;
-    hw_irq_ctrl_clear_irq(IEEE802154_OTNS_ALARM_MICRO_IRQ);
+    *alarm_time_us[alarm] = NSI_NEVER;
+    hw_irq_ctrl_clear_irq(alarm_irq[alarm]);
     nsi_hws_find_next_event();
 }

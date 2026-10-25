@@ -58,6 +58,30 @@ LOG_MODULE_DECLARE(LOG_MODULE_NAME);
 /* RX frame delivery to the net stack                                        */
 /* ------------------------------------------------------------------------- */
 
+struct net_pkt *rx_pkt_new(const uint8_t *psdu, uint16_t psdu_len, int8_t rssi_dbm, uint64_t timestamp_us)
+{
+    uint16_t mac_len = IS_ENABLED(CONFIG_IEEE802154_L2_PKT_INCL_FCS) ? psdu_len : psdu_len - FCS_SIZE;
+
+    struct net_pkt *pkt = net_pkt_rx_alloc_with_buffer(data.iface, mac_len, NET_AF_UNSPEC, 0, K_NO_WAIT);
+    if (pkt == NULL)
+    {
+        LOG_WRN("No RX pkt available, dropping frame");
+        return NULL;
+    }
+
+    if (net_pkt_write(pkt, psdu, mac_len) < 0)
+    {
+        LOG_WRN("Failed to write RX frame");
+        net_pkt_unref(pkt);
+        return NULL;
+    }
+
+    net_pkt_set_ieee802154_lqi(pkt, LQI_PERFECT);
+    net_pkt_set_ieee802154_rssi_dbm(pkt, rssi_dbm);
+    net_pkt_set_timestamp_ns(pkt, timestamp_us * NSEC_PER_USEC);
+    return pkt;
+}
+
 static void deliver_rx(const struct otns_radio_event *ev, bool acked_with_fpb, const struct ack_security_info *security)
 {
     if (ev->psdu_len < FCS_SIZE)
@@ -65,37 +89,16 @@ static void deliver_rx(const struct otns_radio_event *ev, bool acked_with_fpb, c
         return;
     }
 
-    uint16_t mac_len;
-    if (IS_ENABLED(CONFIG_IEEE802154_L2_PKT_INCL_FCS))
-    {
-        mac_len = ev->psdu_len;
-    }
-    else
-    {
-        mac_len = ev->psdu_len - FCS_SIZE;
-    }
-
-    struct net_pkt *pkt = net_pkt_rx_alloc_with_buffer(data.iface, mac_len, NET_AF_UNSPEC, 0, K_NO_WAIT);
+    struct net_pkt *pkt = rx_pkt_new(ev->psdu, ev->psdu_len, ev->data.mPower, ev->timestamp_us);
     if (pkt == NULL)
     {
-        LOG_WRN("No RX pkt available, dropping frame");
         return;
     }
 
-    if (net_pkt_write(pkt, ev->psdu, mac_len) < 0)
-    {
-        LOG_WRN("Failed to write RX frame");
-        net_pkt_unref(pkt);
-        return;
-    }
-
-    net_pkt_set_ieee802154_lqi(pkt, LQI_PERFECT);
-    net_pkt_set_ieee802154_rssi_dbm(pkt, ev->data.mPower);
     net_pkt_set_ieee802154_ack_fpb(pkt, acked_with_fpb);
     net_pkt_set_ieee802154_ack_seb(pkt, security != NULL && security->secured);
     net_pkt_set_ieee802154_ack_keyid(pkt, security != NULL ? security->key_id : 0);
     net_pkt_set_ieee802154_ack_fc(pkt, security != NULL ? security->frame_counter : 0);
-    net_pkt_set_timestamp_ns(pkt, ev->timestamp_us * NSEC_PER_USEC);
 
     if (net_recv_data(data.iface, pkt) < 0)
     {
@@ -113,25 +116,21 @@ static void handle_rx_done(const struct otns_radio_event *ev)
 
     if (frame_is_ack(ev->psdu, ev->psdu_len))
     {
-        if (data.tx_wants_ack && ev->psdu[SEQ_NUM_OFFSET] == data.tx_seq)
-        {
-            uint16_t l = ev->psdu_len;
+        uint16_t l = ev->psdu_len;
 
-            if (l > sizeof(data.ack_psdu))
-            {
-                l = sizeof(data.ack_psdu);
-            }
-            memcpy(data.ack_psdu, ev->psdu, l);
-            data.ack_len          = l;
-            data.ack_timestamp_us = ev->timestamp_us;
+        if (l > sizeof(data.rx_ack_psdu))
+        {
+            l = sizeof(data.rx_ack_psdu);
         }
+        memcpy(data.rx_ack_psdu, ev->psdu, l);
+        data.rx_ack_len          = l;
+        data.rx_ack_timestamp_us = ev->timestamp_us;
         return;
     }
 
     struct frame_addr_info info;
-    bool                   for_me = frame_is_for_me(ev->psdu, ev->psdu_len, &info);
 
-    if (!for_me)
+    if (!parse_frame(ev->psdu, ev->psdu_len, &info))
     {
         return;
     }
@@ -173,32 +172,18 @@ static int err_to_errno(uint8_t error)
 
 static void handle_tx_done(const struct otns_radio_event *ev)
 {
-    if (data.ack_tx_pending)
-    {
-        data.ack_tx_pending = false;
-        if (data.sleep_pending)
-        {
-            data.sleep_pending = false;
-            nsi_otns_bottom_set_state(OT_RADIO_STATE_SLEEP, data.channel);
-        }
-        return;
-    }
     data.tx_result = err_to_errno(ev->data.mError);
     k_sem_give(&data.tx_wait);
 }
 
 static void handle_chan_sample(const struct otns_radio_event *ev)
 {
-    if (data.ed_scan_pending)
-    {
-        energy_scan_done_cb_t cb = data.ed_done_cb;
+    energy_scan_done_cb_t cb = data.ed_done_cb;
 
-        data.ed_scan_pending = false;
-        data.ed_done_cb      = NULL;
-        if (cb != NULL)
-        {
-            cb(radio_dev, ev->data.mPower);
-        }
+    if (cb != NULL)
+    {
+        data.ed_done_cb = NULL;
+        cb(radio_dev, ev->data.mPower);
         return;
     }
     data.cca_channel_free = ev->data.mError == OT_ERROR_NONE && (ev->data.mPower == (int8_t)OT_RADIO_RSSI_INVALID ||

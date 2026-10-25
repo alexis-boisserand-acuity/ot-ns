@@ -33,6 +33,7 @@
 #include <zephyr/net/ieee802154_radio.h>
 #include <zephyr/net/net_pkt.h>
 #include <zephyr/sys/byteorder.h>
+#include <zephyr/sys/crc.h>
 
 #include <openthread-core-config.h>
 #include <openthread/link.h>
@@ -48,9 +49,6 @@
 #define LOG_MODULE_NAME ieee802154_otns
 #include <zephyr/logging/log.h>
 LOG_MODULE_DECLARE(LOG_MODULE_NAME);
-
-#define CRC_POLY_KERMIT 0x8408U
-#define CRC_INIT 0
 
 #define HEADER_IE_HDR_SIZE 2
 #define HEADER_IE_LEN_MASK 0x7f
@@ -73,24 +71,8 @@ static uint8_t  ack_rx_psdu[OT_RADIO_FRAME_MAX_SIZE];
 static uint16_t ack_rx_len;
 
 /* ------------------------------------------------------------------------- */
-/* Framing helpers (CRC, OpenThread radio frame wrapper)                     */
+/* OpenThread radio frame wrapper                                            */
 /* ------------------------------------------------------------------------- */
-
-uint16_t crc16(const uint8_t *data, size_t len)
-{
-    uint16_t crc = CRC_INIT;
-
-    for (size_t i = 0; i < len; i++)
-    {
-        crc ^= data[i];
-        for (int b = 0; b < 8; b++)
-        {
-            crc = (crc & 1U) ? (crc >> 1) ^ CRC_POLY_KERMIT : (crc >> 1);
-        }
-    }
-
-    return crc;
-}
 
 static otRadioFrame radio_frame(const uint8_t *psdu, uint16_t length)
 {
@@ -99,130 +81,73 @@ static otRadioFrame radio_frame(const uint8_t *psdu, uint16_t length)
     memset(&frame, 0, sizeof(frame));
     frame.mPsdu    = (uint8_t *)psdu;
     frame.mLength  = length;
-    frame.mChannel = data.channel;
+    frame.mChannel = nsi_otns_bottom_get_channel();
 
     return frame;
-}
-
-/* ------------------------------------------------------------------------- */
-/* 802.15.4 frame parsing                                                    */
-/* ------------------------------------------------------------------------- */
-
-bool frame_is_for_me(const uint8_t *psdu, uint16_t len, struct frame_addr_info *info)
-{
-    return frame_addr_matches(psdu, len, info, sys_get_le16(data.pan_id), data.short_addr, data.ext_addr);
 }
 
 /* ------------------------------------------------------------------------- */
 /* Auto-ACK frame-pending-bit (FPB) address list                             */
 /* ------------------------------------------------------------------------- */
 
-static bool fpb_short_contains(uint16_t addr)
+static struct fpb_list *fpb_list_for(bool extended) { return extended ? &data.fpb_ext : &data.fpb_short; }
+
+static size_t fpb_addr_size(bool extended) { return extended ? OT_EXT_ADDRESS_SIZE : SHORT_ADDR_SIZE; }
+
+static int fpb_find(bool extended, const uint8_t *addr)
 {
-    for (int i = 0; i < data.fpb_short_count; i++)
+    const struct fpb_list *list = fpb_list_for(extended);
+
+    for (int i = 0; i < list->count; i++)
     {
-        if (data.fpb_short[i] == addr)
+        if (memcmp(list->entries[i], addr, fpb_addr_size(extended)) == 0)
         {
-            return true;
+            return i;
         }
     }
-    return false;
+    return -1;
 }
 
-static bool fpb_ext_contains(const uint8_t *addr)
+int fpb_configure(bool extended, const uint8_t *addr, bool enabled)
 {
-    for (int i = 0; i < data.fpb_ext_count; i++)
+    struct fpb_list *list = fpb_list_for(extended);
+    int              idx;
+
+    if (addr == NULL)
     {
-        if (memcmp(data.fpb_ext[i], addr, OT_EXT_ADDRESS_SIZE) == 0)
+        list->count = 0;
+        return 0;
+    }
+
+    idx = fpb_find(extended, addr);
+
+    if (enabled)
+    {
+        if (idx >= 0)
         {
-            return true;
+            return 0;
         }
-    }
-    return false;
-}
-
-int fpb_short_add(uint16_t addr)
-{
-    int ret = 0;
-
-    if (fpb_short_contains(addr))
-    {
-        ret = 0;
-    }
-    else if (data.fpb_short_count >= MAX_FPB_ENTRIES)
-    {
-        ret = -ENOMEM;
-    }
-    else
-    {
-        data.fpb_short[data.fpb_short_count++] = addr;
-    }
-
-    return ret;
-}
-
-int fpb_short_remove(uint16_t addr)
-{
-    int ret = -ENOENT;
-
-    for (int i = 0; i < data.fpb_short_count; i++)
-    {
-        if (data.fpb_short[i] == addr)
+        if (list->count >= MAX_FPB_ENTRIES)
         {
-            data.fpb_short[i] = data.fpb_short[--data.fpb_short_count];
-            ret               = 0;
-            break;
+            return -ENOMEM;
         }
+        memcpy(list->entries[list->count++], addr, fpb_addr_size(extended));
+        return 0;
     }
 
-    return ret;
+    if (idx < 0)
+    {
+        return -ENOENT;
+    }
+    memcpy(list->entries[idx], list->entries[--list->count], sizeof(list->entries[idx]));
+    return 0;
 }
-
-void fpb_short_clear(void) { data.fpb_short_count = 0; }
-
-int fpb_ext_add(const uint8_t *addr)
-{
-    int ret = 0;
-
-    if (fpb_ext_contains(addr))
-    {
-        ret = 0;
-    }
-    else if (data.fpb_ext_count >= MAX_FPB_ENTRIES)
-    {
-        ret = -ENOMEM;
-    }
-    else
-    {
-        memcpy(data.fpb_ext[data.fpb_ext_count++], addr, OT_EXT_ADDRESS_SIZE);
-    }
-
-    return ret;
-}
-
-int fpb_ext_remove(const uint8_t *addr)
-{
-    int ret = -ENOENT;
-
-    for (int i = 0; i < data.fpb_ext_count; i++)
-    {
-        if (memcmp(data.fpb_ext[i], addr, OT_EXT_ADDRESS_SIZE) == 0)
-        {
-            memcpy(data.fpb_ext[i], data.fpb_ext[--data.fpb_ext_count], OT_EXT_ADDRESS_SIZE);
-            ret = 0;
-            break;
-        }
-    }
-
-    return ret;
-}
-
-void fpb_ext_clear(void) { data.fpb_ext_count = 0; }
 
 bool frame_pending_for(const uint8_t *psdu, uint16_t len)
 {
     otRadioFrame frame = radio_frame(psdu, len);
     otMacAddress src;
+    uint8_t      addr_le[OT_EXT_ADDRESS_SIZE];
 
     if (!data.auto_ack_fpb_enabled)
     {
@@ -237,19 +162,12 @@ bool frame_pending_for(const uint8_t *psdu, uint16_t len)
     switch (src.mType)
     {
     case OT_MAC_ADDRESS_TYPE_SHORT:
-        return fpb_short_contains(src.mAddress.mShortAddress);
+        sys_put_le16(src.mAddress.mShortAddress, addr_le);
+        return fpb_find(false, addr_le) >= 0;
 
     case OT_MAC_ADDRESS_TYPE_EXTENDED:
-    {
-        /* OpenThread extended addresses are big-endian, the FPB list uses the over-the-air (little-endian) order. */
-        uint8_t ext_le[OT_EXT_ADDRESS_SIZE];
-
-        for (int i = 0; i < OT_EXT_ADDRESS_SIZE; i++)
-        {
-            ext_le[i] = src.mAddress.mExtAddress.m8[OT_EXT_ADDRESS_SIZE - 1 - i];
-        }
-        return fpb_ext_contains(ext_le);
-    }
+        ext_addr_reverse(addr_le, src.mAddress.mExtAddress.m8);
+        return fpb_find(true, addr_le) >= 0;
 
     default:
         return false;
@@ -291,12 +209,13 @@ static void set_tx_csl_ie(otRadioFrame *frame, uint32_t delay_us)
 #if OPENTHREAD_CONFIG_THREAD_VERSION >= OT_THREAD_VERSION_1_2
 static bool ack_ie_matches_dst(const struct enh_ack_ie *ie, const otMacAddress *src)
 {
-    if (!ie->has_short_filter && !ie->has_ext_filter)
+    bool has_short_filter = ie->short_addr != OT_RADIO_BROADCAST_SHORT_ADDR;
+
+    if (!has_short_filter && !ie->has_ext_filter)
     {
         return true;
     }
-    if (ie->has_short_filter && src->mType == OT_MAC_ADDRESS_TYPE_SHORT &&
-        src->mAddress.mShortAddress == ie->short_addr)
+    if (has_short_filter && src->mType == OT_MAC_ADDRESS_TYPE_SHORT && src->mAddress.mShortAddress == ie->short_addr)
     {
         return true;
     }
@@ -428,6 +347,7 @@ static int aes_ccm_encrypt(otRadioFrame *frame, const uint8_t *key)
 {
     otMacKeyMaterial material;
     otExtAddress     ext_addr;
+    uint8_t          ext_addr_le[OT_EXT_ADDRESS_SIZE];
     int              ret = 0;
 
     memset(&material, 0, sizeof(material));
@@ -447,10 +367,8 @@ static int aes_ccm_encrypt(otRadioFrame *frame, const uint8_t *key)
 #endif
 
     /* The CCM nonce is built from the big-endian extended address; the driver stores it in over-the-air order. */
-    for (int i = 0; i < OT_EXT_ADDRESS_SIZE; i++)
-    {
-        ext_addr.m8[i] = data.ext_addr[OT_EXT_ADDRESS_SIZE - 1 - i];
-    }
+    nsi_otns_bottom_get_ext_addr(ext_addr_le);
+    ext_addr_reverse(ext_addr.m8, ext_addr_le);
 
     frame->mInfo.mTxInfo.mAesKey = &material;
     otMacFrameProcessTransmitAesCcm(frame, &ext_addr);
@@ -609,7 +527,7 @@ static int generate_ack(otRadioFrame             *rx_frame,
     {
         uint16_t fcs_off = ack_frame->mLength - FCS_SIZE;
 
-        sys_put_le16(crc16(ack_frame->mPsdu, fcs_off), &ack_frame->mPsdu[fcs_off]);
+        sys_put_le16(crc16_ccitt(0, ack_frame->mPsdu, fcs_off), &ack_frame->mPsdu[fcs_off]);
     }
 
     return ret;
@@ -638,7 +556,7 @@ bool schedule_ack(const uint8_t *rx_psdu, uint16_t rx_len, int8_t rssi, struct a
         return false;
     }
 
-    ret = nsi_otns_bottom_tx_after(data.channel, data.txpower, ack, ack_frame.mLength, AIFS_TURNAROUND_US);
+    ret = nsi_otns_bottom_tx_after(ack, ack_frame.mLength, AIFS_TURNAROUND_US);
     if (ret != 0)
     {
         memset(security, 0, sizeof(*security));
@@ -646,8 +564,7 @@ bool schedule_ack(const uint8_t *rx_psdu, uint16_t rx_len, int8_t rssi, struct a
         return false;
     }
     memcpy(ack_rx_psdu, rx_psdu, rx_len);
-    ack_rx_len          = rx_len;
-    data.ack_tx_pending = true;
+    ack_rx_len = rx_len;
     return true;
 }
 
@@ -681,25 +598,28 @@ int refresh_ack(uint8_t *psdu, uint16_t len)
         }
     }
 
-    sys_put_le16(crc16(psdu, len - FCS_SIZE), &psdu[len - FCS_SIZE]);
+    sys_put_le16(crc16_ccitt(0, psdu, len - FCS_SIZE), &psdu[len - FCS_SIZE]);
     return 0;
+}
+
+static bool ack_ie_has_filter(const struct enh_ack_ie *ie, uint16_t short_addr, const uint8_t *ext_addr_be)
+{
+    return ie->short_addr == short_addr && ie->has_ext_filter == (ext_addr_be != NULL) &&
+           (ext_addr_be == NULL || memcmp(ie->ext_addr_be, ext_addr_be, OT_EXT_ADDRESS_SIZE) == 0);
 }
 
 int configure_enh_ack_ie(const struct ieee802154_config *config)
 {
-    const uint8_t *raw                   = (const uint8_t *)config->ack_ie.header_ie;
-    uint16_t       short_addr            = config->ack_ie.short_addr;
-    const uint8_t *ext_addr_be           = config->ack_ie.ext_addr;
-    bool           has_short_filter      = short_addr != OT_RADIO_BROADCAST_SHORT_ADDR;
-    bool           has_ext_filter        = ext_addr_be != NULL;
-    bool           remove_all_for_filter = config->ack_ie.purge_ie || raw == NULL;
-    uint8_t        element_id            = 0;
-    uint8_t        content_len           = 0;
-    int            slot                  = -1;
-    int            free_slot             = -1;
-    int            ret                   = 0;
+    const uint8_t     *raw         = (const uint8_t *)config->ack_ie.header_ie;
+    uint16_t           short_addr  = config->ack_ie.short_addr;
+    const uint8_t     *ext_addr_be = config->ack_ie.ext_addr;
+    bool               remove_all  = config->ack_ie.purge_ie || raw == NULL;
+    uint8_t            element_id  = 0;
+    uint8_t            content_len = 0;
+    struct enh_ack_ie *slot        = NULL;
+    struct enh_ack_ie *free_slot   = NULL;
 
-    if (!remove_all_for_filter)
+    if (!remove_all)
     {
         uint16_t hdr = sys_get_le16(raw);
 
@@ -718,67 +638,51 @@ int configure_enh_ack_ie(const struct ieee802154_config *config)
 
         if (!ie->valid)
         {
-            if (free_slot < 0)
+            free_slot = free_slot != NULL ? free_slot : ie;
+        }
+        else if (ack_ie_has_filter(ie, short_addr, ext_addr_be))
+        {
+            if (remove_all)
             {
-                free_slot = i;
+                ie->valid = false;
             }
-            continue;
-        }
-
-        bool same_filter = ie->has_short_filter == has_short_filter &&
-                           (!has_short_filter || ie->short_addr == short_addr) &&
-                           ie->has_ext_filter == has_ext_filter &&
-                           (!has_ext_filter || memcmp(ie->ext_addr_be, ext_addr_be, OT_EXT_ADDRESS_SIZE) == 0);
-
-        if (!same_filter)
-        {
-            continue;
-        }
-        if (remove_all_for_filter)
-        {
-            ie->valid = false;
-        }
-        else if (ie->element_id == element_id)
-        {
-            slot = i;
-        }
-    }
-
-    if (remove_all_for_filter || content_len == 0)
-    {
-        if (slot >= 0)
-        {
-            data.ack_ies[slot].valid = false;
-        }
-    }
-    else
-    {
-        if (slot < 0)
-        {
-            slot = free_slot;
-        }
-
-        if (slot < 0)
-        {
-            ret = -ENOMEM;
-        }
-        else
-        {
-            struct enh_ack_ie *ie = &data.ack_ies[slot];
-
-            ie->element_id  = element_id;
-            ie->content_len = content_len;
-            memcpy(ie->content, raw + HEADER_IE_HDR_SIZE, content_len);
-            ie->has_short_filter = has_short_filter;
-            ie->short_addr       = short_addr;
-            ie->has_ext_filter   = has_ext_filter;
-            if (has_ext_filter)
+            else if (ie->element_id == element_id)
             {
-                memcpy(ie->ext_addr_be, ext_addr_be, OT_EXT_ADDRESS_SIZE);
+                slot = ie;
             }
-            ie->valid = true;
         }
     }
 
-    return ret;
+    if (remove_all)
+    {
+        return 0;
+    }
+
+    if (content_len == 0)
+    {
+        if (slot != NULL)
+        {
+            slot->valid = false;
+        }
+        return 0;
+    }
+
+    slot = slot != NULL ? slot : free_slot;
+    if (slot == NULL)
+    {
+        return -ENOMEM;
+    }
+
+    slot->element_id  = element_id;
+    slot->content_len = content_len;
+    memcpy(slot->content, raw + HEADER_IE_HDR_SIZE, content_len);
+    slot->short_addr     = short_addr;
+    slot->has_ext_filter = ext_addr_be != NULL;
+    if (ext_addr_be != NULL)
+    {
+        memcpy(slot->ext_addr_be, ext_addr_be, OT_EXT_ADDRESS_SIZE);
+    }
+    slot->valid = true;
+
+    return 0;
 }

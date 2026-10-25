@@ -29,6 +29,12 @@
 #ifndef IEEE802154_OTNS_ISR_H__
 #define IEEE802154_OTNS_ISR_H__
 
+#include <stdint.h>
+
+struct net_pkt;
+
 void isr(const void *arg);
+
+struct net_pkt *rx_pkt_new(const uint8_t *psdu, uint16_t psdu_len, int8_t rssi_dbm, uint64_t timestamp_us);
 
 #endif /* IEEE802154_OTNS_ISR_H__ */

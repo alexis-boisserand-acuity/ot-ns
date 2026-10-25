@@ -64,10 +64,15 @@ struct enh_ack_ie
     uint8_t  element_id;
     uint8_t  content_len;
     uint8_t  content[ACK_IE_MAX_CONTENT];
-    bool     has_short_filter;
     uint16_t short_addr;
     bool     has_ext_filter;
     uint8_t  ext_addr_be[OT_EXT_ADDRESS_SIZE];
+};
+
+struct fpb_list
+{
+    uint8_t count;
+    uint8_t entries[MAX_FPB_ENTRIES][OT_EXT_ADDRESS_SIZE];
 };
 
 struct radio_data
@@ -81,27 +86,15 @@ struct radio_data
     int  tx_result;
     bool cca_channel_free;
 
-    bool     tx_wants_ack;
-    uint8_t  tx_seq;
-    uint8_t  ack_psdu[OT_RADIO_FRAME_MAX_SIZE];
-    uint16_t ack_len;
-    uint64_t ack_timestamp_us;
+    uint8_t  rx_ack_psdu[OT_RADIO_FRAME_MAX_SIZE];
+    uint16_t rx_ack_len;
+    uint64_t rx_ack_timestamp_us;
 
-    uint8_t pan_id[PAN_ID_SIZE];
-    uint8_t short_addr[SHORT_ADDR_SIZE];
-    uint8_t ext_addr[OT_EXT_ADDRESS_SIZE];
+    bool            auto_ack_fpb_enabled;
+    struct fpb_list fpb_short;
+    struct fpb_list fpb_ext;
 
-    bool     auto_ack_fpb_enabled;
-    uint16_t fpb_short[MAX_FPB_ENTRIES];
-    uint8_t  fpb_short_count;
-    uint8_t  fpb_ext[MAX_FPB_ENTRIES][OT_EXT_ADDRESS_SIZE];
-    uint8_t  fpb_ext_count;
-
-    bool                  ed_scan_pending;
     energy_scan_done_cb_t ed_done_cb;
-
-    bool ack_tx_pending;
-    bool sleep_pending;
 
     uint32_t csl_period;
     int64_t  csl_expected_rx_time_ns;
@@ -111,9 +104,7 @@ struct radio_data
     struct mac_key_entry mac_keys[MAX_MAC_KEYS];
     uint32_t             mac_frame_counter;
 
-    uint8_t channel;
-    int8_t  txpower;
-    bool    started;
+    bool started;
 };
 
 extern struct radio_data data;
