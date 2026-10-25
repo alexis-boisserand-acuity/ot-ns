@@ -54,11 +54,8 @@ LOG_MODULE_REGISTER(LOG_MODULE_NAME);
 #include <zephyr/net/ieee802154_radio.h>
 #include <zephyr/net/net_if.h>
 #include <zephyr/net/net_pkt.h>
-#include <zephyr/sys/byteorder.h>
-
-#if defined(CONFIG_NET_L2_OPENTHREAD)
 #include <zephyr/net/openthread.h>
-#endif
+#include <zephyr/sys/byteorder.h>
 
 #include "ieee802154_data.h"
 #include "ieee802154_frame.h"
