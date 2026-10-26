@@ -4,9 +4,9 @@ This directory contains a Zephyr module providing an IEEE 802.15.4 driver for si
 
 ## Prerequisites
 
-This module requires a [Zephyr](https://github.com/zephyrproject-rtos/zephyr) workspace and SDK.
+This module requires a [Zephyr](https://github.com/zephyrproject-rtos/zephyr) workspace (>=v4.5.0-rc3) and SDK.
 
-You can run `zephyr/script/setup_zephyr_workspace` to automatically install a Zephyr reference workspace.
+You can run `zephyr/script/setup_zephyr_env` to automatically install a Zephyr reference workspace and SDK.
 
 Make sure you are in a Python environment with the `west` command available on `PATH`, and that the `ZEPHYR_BASE` environment variable points to your Zephyr installation.
 

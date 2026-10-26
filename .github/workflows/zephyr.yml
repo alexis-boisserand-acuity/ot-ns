@@ -46,8 +46,6 @@ jobs:
     name: Build Zephyr nodes (native_sim)
     runs-on: ubuntu-24.04
     timeout-minutes: 60
-    container:
-      image: ghcr.io/zephyrproject-rtos/ci:v0.29.4
     env:
       # native_sim only needs the host compiler, not the Zephyr SDK toolchains.
       ZEPHYR_TOOLCHAIN_VARIANT: host
@@ -56,11 +54,11 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Set up minimal Zephyr workspace
+      - name: Set up minimal Zephyr environment
         env:
           ZEPHYR_WORKSPACE: ${{ runner.temp }}/zephyr-workspace
         run: |
-          ./zephyr/script/setup_zephyr_workspace "${ZEPHYR_WORKSPACE}"
+          ./zephyr/script/setup_zephyr_env "${ZEPHYR_WORKSPACE}"
           echo "ZEPHYR_BASE=${ZEPHYR_WORKSPACE}/zephyr" >> "${GITHUB_ENV}"
           echo "${ZEPHYR_WORKSPACE}/.venv/bin" >> "${GITHUB_PATH}"
 
