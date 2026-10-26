@@ -165,6 +165,8 @@ void __wrap_platformAlarmMicroInit(void)
 
 void __wrap_platformAlarmMilliProcess(otInstance *aInstance)
 {
+    // It is a bit hacky to call otns_host_msg_process() here, as it relies on the knowledge
+    // that this function is called from the main loop context.
     otns_host_msg_process(aInstance);
 
     if (alarm_take_fired(OTNS_ALARM_MILLI))
