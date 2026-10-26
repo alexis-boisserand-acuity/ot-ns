@@ -48,6 +48,9 @@
 
 #include "ieee802154_priv.h"
 
+#define US_PER_MS 1000
+#define US_PER_US 1
+
 struct alarm
 {
     volatile bool fired;
@@ -55,8 +58,8 @@ struct alarm
 };
 
 static struct alarm alarms[OTNS_ALARM_COUNT] = {
-    [OTNS_ALARM_MILLI] = {.us_per_tick = 1000},
-    [OTNS_ALARM_MICRO] = {.us_per_tick = 1},
+    [OTNS_ALARM_MILLI] = {.us_per_tick = US_PER_MS},
+    [OTNS_ALARM_MICRO] = {.us_per_tick = US_PER_US},
 };
 static int32_t time_offset_ms;
 static int32_t time_offset_us;
@@ -71,7 +74,8 @@ static void alarm_isr(const void *arg)
 
 static uint32_t alarm_milli_get_now(void)
 {
-    return (uint32_t)(nsi_otns_bottom_get_time_us() / 1000) - time_offset_ms - nsi_otns_bottom_get_drift_offset_ms();
+    return (uint32_t)(nsi_otns_bottom_get_time_us() / US_PER_MS) - time_offset_ms -
+           nsi_otns_bottom_get_drift_offset_ms();
 }
 
 static uint32_t alarm_micro_get_now(void) { return (uint32_t)nsi_otns_bottom_get_time_us() - time_offset_us; }
@@ -155,7 +159,7 @@ void __wrap_platformAlarmMicroInit(void)
 
 #if defined(CONFIG_OPENTHREAD_PLATFORM_PKT_TXTIME)
     time_offset_us = (int32_t)((int64_t)alarm_micro_get_now() - (uint32_t)otPlatRadioGetNow(NULL));
-    __wrap_alarm_milli_set_time_offset_ms(time_offset_us / 1000);
+    __wrap_alarm_milli_set_time_offset_ms(time_offset_us / US_PER_MS);
 #endif
 }
 

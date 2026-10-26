@@ -41,6 +41,9 @@
 
 #include "ieee802154_priv.h"
 
+#define ALARM_MILLI_PRIO 942
+#define ALARM_MICRO_PRIO 944
+
 static uint64_t alarm_time_milli_us = NSI_NEVER;
 static uint64_t alarm_time_micro_us = NSI_NEVER;
 
@@ -64,8 +67,8 @@ static void alarm_milli_timer_fired(void) { alarm_timer_fired(OTNS_ALARM_MILLI);
 
 static void alarm_micro_timer_fired(void) { alarm_timer_fired(OTNS_ALARM_MICRO); }
 
-NSI_HW_EVENT(alarm_time_milli_us, alarm_milli_timer_fired, 942);
-NSI_HW_EVENT(alarm_time_micro_us, alarm_micro_timer_fired, 944);
+NSI_HW_EVENT(alarm_time_milli_us, alarm_milli_timer_fired, ALARM_MILLI_PRIO);
+NSI_HW_EVENT(alarm_time_micro_us, alarm_micro_timer_fired, ALARM_MICRO_PRIO);
 
 uint64_t nsi_otns_bottom_get_time_us(void) { return nsi_hws_get_time(); }
 

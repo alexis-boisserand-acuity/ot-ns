@@ -39,45 +39,63 @@
 #include <zephyr/logging/log.h>
 LOG_MODULE_DECLARE(LOG_MODULE_NAME);
 
-#define OTNS_HOST_MAX_DATAGRAM_LEN 1280
-#define OTNS_IP6_HEADER_LEN 40
-#define OTNS_IP6_NEXT_HDR_TCP 6
-#define OTNS_IP6_NEXT_HDR_UDP 17
-#define OTNS_TMF_PORT 61631 /* mesh-local TMF messages are never forwarded to the host */
+#define HOST_MAX_DATAGRAM_LEN 1280
+#define IP6_NEXT_HDR_TCP 6
+#define IP6_NEXT_HDR_UDP 17
+#define TMF_PORT 61631
+
+#define IP6_SRC_OFFSET 8
+#define IP6_DST_OFFSET 24
+#define IP6_NEXT_HDR_OFFSET 6
+#define L4_PORTS_LEN 4
+#define PORT_BYTE_SHIFT 8
+
+#define IP6_FE80_BYTE0 0xfe
+#define IP6_LL_BYTE1_MASK 0xc0
+#define IP6_LL_BYTE1_VALUE 0x80
+#define IP6_MCAST_BYTE0 0xff
+#define IP6_MCAST_SCOPE_MASK 0x0f
+#define IP6_MCAST_SCOPE_LINK_LOCAL 0x02
+#define IP6_MCAST_SCOPE_NONE 0xff
+#define IP6_MCAST_SCOPE_MIN_FORWARD 0x04
 
 static bool                 s_registered;
-static uint8_t              s_host_buf[sizeof(struct MsgToHostEventData) + OTNS_HOST_MAX_DATAGRAM_LEN];
+static uint8_t              s_host_buf[sizeof(struct MsgToHostEventData) + HOST_MAX_DATAGRAM_LEN];
 static otIp6ReceiveCallback s_downstream_cb;
 static void                *s_downstream_ctx;
 static bool                 s_ip6_cb_installed;
 
 static bool is_link_local(const uint8_t *addr)
 {
-    return (addr[0] == 0xfe && (addr[1] & 0xc0) == 0x80) || (addr[0] == 0xff && (addr[1] & 0x0f) == 0x02);
+    return (addr[0] == IP6_FE80_BYTE0 && (addr[1] & IP6_LL_BYTE1_MASK) == IP6_LL_BYTE1_VALUE) ||
+           (addr[0] == IP6_MCAST_BYTE0 && (addr[1] & IP6_MCAST_SCOPE_MASK) == IP6_MCAST_SCOPE_LINK_LOCAL);
 }
 
-static uint8_t mcast_scope(const uint8_t *addr) { return addr[0] == 0xff ? (addr[1] & 0x0f) : 0xff; }
+static uint8_t mcast_scope(const uint8_t *addr)
+{
+    return addr[0] == IP6_MCAST_BYTE0 ? (addr[1] & IP6_MCAST_SCOPE_MASK) : IP6_MCAST_SCOPE_NONE;
+}
 
 static bool parse_ip6(const otMessage *aMessage, struct MsgToHostEventData *aInfo)
 {
-    uint8_t hdr[OTNS_IP6_HEADER_LEN];
-    uint8_t ports[4];
+    uint8_t hdr[OT_IP6_HEADER_SIZE];
+    uint8_t ports[L4_PORTS_LEN];
 
     if (otMessageRead(aMessage, 0, hdr, sizeof(hdr)) != sizeof(hdr))
     {
         return false;
     }
 
-    memcpy(aInfo->mSrcIp6, &hdr[8], OT_IP6_ADDRESS_SIZE);
-    memcpy(aInfo->mDstIp6, &hdr[24], OT_IP6_ADDRESS_SIZE);
+    memcpy(aInfo->mSrcIp6, &hdr[IP6_SRC_OFFSET], OT_IP6_ADDRESS_SIZE);
+    memcpy(aInfo->mDstIp6, &hdr[IP6_DST_OFFSET], OT_IP6_ADDRESS_SIZE);
     aInfo->mSrcPort = 0;
     aInfo->mDstPort = 0;
 
-    if ((hdr[6] == OTNS_IP6_NEXT_HDR_UDP || hdr[6] == OTNS_IP6_NEXT_HDR_TCP) &&
-        otMessageRead(aMessage, OTNS_IP6_HEADER_LEN, ports, sizeof(ports)) == sizeof(ports))
+    if ((hdr[IP6_NEXT_HDR_OFFSET] == IP6_NEXT_HDR_UDP || hdr[IP6_NEXT_HDR_OFFSET] == IP6_NEXT_HDR_TCP) &&
+        otMessageRead(aMessage, OT_IP6_HEADER_SIZE, ports, sizeof(ports)) == sizeof(ports))
     {
-        aInfo->mSrcPort = (uint16_t)((ports[0] << 8) | ports[1]);
-        aInfo->mDstPort = (uint16_t)((ports[2] << 8) | ports[3]);
+        aInfo->mSrcPort = (uint16_t)((ports[0] << PORT_BYTE_SHIFT) | ports[1]);
+        aInfo->mDstPort = (uint16_t)((ports[2] << PORT_BYTE_SHIFT) | ports[3]);
     }
 
     return true;
@@ -86,15 +104,15 @@ static bool parse_ip6(const otMessage *aMessage, struct MsgToHostEventData *aInf
 static bool should_forward_to_host(const otMessage *aMessage, const struct MsgToHostEventData *aInfo)
 {
     return otMessageIsLoopbackToHostAllowed(aMessage) && aInfo->mSrcPort > 0 && aInfo->mDstPort > 0 &&
-           aInfo->mDstPort != OTNS_TMF_PORT && !is_link_local(aInfo->mSrcIp6) && !is_link_local(aInfo->mDstIp6) &&
-           mcast_scope(aInfo->mDstIp6) >= 0x4;
+           aInfo->mDstPort != TMF_PORT && !is_link_local(aInfo->mSrcIp6) && !is_link_local(aInfo->mDstIp6) &&
+           mcast_scope(aInfo->mDstIp6) >= IP6_MCAST_SCOPE_MIN_FORWARD;
 }
 
 static void send_to_host(uint8_t type, const struct MsgToHostEventData *info, const otMessage *aMessage)
 {
     uint16_t msgLen = otMessageGetLength(aMessage);
 
-    if (msgLen > OTNS_HOST_MAX_DATAGRAM_LEN)
+    if (msgLen > HOST_MAX_DATAGRAM_LEN)
     {
         LOG_WRN("Datagram too large for host (%u bytes)", msgLen);
         return;

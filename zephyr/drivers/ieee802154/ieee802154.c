@@ -68,7 +68,10 @@ LOG_MODULE_REGISTER(LOG_MODULE_NAME);
 
 #define CCA_TIMEOUT_MS 10
 
-#define FCF_BYTE0_ACK_REQ_BIT (FCF_ACK_REQ_BIT & 0xff)
+#define BYTE_MASK 0xff
+#define BITS_PER_BYTE 8
+
+#define FCF_BYTE0_ACK_REQ_BIT (FCF_ACK_REQ_BIT & BYTE_MASK)
 
 #define DEFAULT_NODE_ID 1
 
@@ -449,10 +452,10 @@ static void get_mac(void)
     data.mac_addr[1] = EUI64_BYTE_1;
     data.mac_addr[2] = EUI64_BYTE_2;
     data.mac_addr[3] = EUI64_BYTE_3;
-    data.mac_addr[4] = (node_id >> 24) & 0xff;
-    data.mac_addr[5] = (node_id >> 16) & 0xff;
-    data.mac_addr[6] = (node_id >> 8) & 0xff;
-    data.mac_addr[7] = node_id & 0xff;
+    data.mac_addr[4] = (node_id >> (3 * BITS_PER_BYTE)) & BYTE_MASK;
+    data.mac_addr[5] = (node_id >> (2 * BITS_PER_BYTE)) & BYTE_MASK;
+    data.mac_addr[6] = (node_id >> BITS_PER_BYTE) & BYTE_MASK;
+    data.mac_addr[7] = node_id & BYTE_MASK;
 }
 
 static void iface_init(struct net_if *iface)

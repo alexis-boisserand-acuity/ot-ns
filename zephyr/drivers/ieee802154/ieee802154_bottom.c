@@ -67,6 +67,19 @@
 #define RADIO_COMM_EVENT_DATA_SIZE sizeof(struct RadioCommEventData)
 #define MAX_SLEEP_US 3600000000ULL
 #define DRIFT_ACCUM_PER_US 1000000
+#define US_PER_MS 1000
+#define US_PER_SEC 1000000U
+#define BITS_PER_BYTE 8
+#define BYTE_MASK 0xff
+#define RADIO_MIN_FRAME_SIZE 3
+#define TX_INTERFERER_LEVEL_MAX 100
+#define INTERFERER_DELAY_RANGE_US 1000000
+#define INTERFERER_LEVEL_STEP_US 10000
+#define PACER_PRIO 950
+#define RADIO_TIMER_PRIO 940
+#define REGISTER_CMDLINE_ORDER 200
+#define BOOT_ORDER 500
+#define CLEANUP_ORDER 100
 #define RFSIM_PARAM_RSP_DATA_SIZE (sizeof(uint8_t) + sizeof(int32_t))
 
 /* ------------------------------------------------------------------------- */
@@ -88,8 +101,8 @@ static bool         have_pending;
 static struct otns_radio_event deliver_ev;
 static bool                    deliver_ready;
 
-#define OTNS_HOST_MSG_QUEUE_LEN 8
-static struct otns_host_msg host_msgs[OTNS_HOST_MSG_QUEUE_LEN];
+#define HOST_MSG_QUEUE_LEN 8
+static struct otns_host_msg host_msgs[HOST_MSG_QUEUE_LEN];
 static unsigned             host_msg_head;
 static unsigned             host_msg_count;
 static uint8_t              ack_psdu[OT_RADIO_FRAME_MAX_SIZE];
@@ -206,7 +219,7 @@ static void update_alarm_drift_offset(uint64_t now)
         s_drift_ps -= whole_us * DRIFT_ACCUM_PER_US;
         s_drift_us_total += whole_us;
 
-        s_drift_offset_ms_applied = (int32_t)(-(s_drift_us_total / 1000));
+        s_drift_offset_ms_applied = (int32_t)(-(s_drift_us_total / US_PER_MS));
     }
 }
 
@@ -375,13 +388,13 @@ static void raise_embedded(const struct otns_radio_event *ev)
 
 static void queue_host_msg(const struct Event *raw)
 {
-    if (host_msg_count == OTNS_HOST_MSG_QUEUE_LEN)
+    if (host_msg_count == HOST_MSG_QUEUE_LEN)
     {
         fprintf(stderr, "[otns] host message queue full, dropping ev=%u\n", raw->mEvent);
         return;
     }
 
-    struct otns_host_msg *slot = &host_msgs[(host_msg_head + host_msg_count) % OTNS_HOST_MSG_QUEUE_LEN];
+    struct otns_host_msg *slot = &host_msgs[(host_msg_head + host_msg_count) % HOST_MSG_QUEUE_LEN];
 
     slot->type = raw->mEvent;
     slot->len  = raw->mDataLength;
@@ -648,7 +661,7 @@ static int event_is_for_embedded(uint8_t type)
 
 static void set_tx_interferer_level(int32_t value)
 {
-    uint8_t level = (value < 0) ? 0 : ((value > 100) ? 100 : (uint8_t)value);
+    uint8_t level = (value < 0) ? 0 : ((value > TX_INTERFERER_LEVEL_MAX) ? TX_INTERFERER_LEVEL_MAX : (uint8_t)value);
 
     if (level == tx_interferer_level)
     {
@@ -895,7 +908,7 @@ static void pacer(void)
     }
 }
 
-NSI_HW_EVENT(pacer_time, pacer, 950);
+NSI_HW_EVENT(pacer_time, pacer, PACER_PRIO);
 
 /* ------------------------------------------------------------------------- */
 /* Command line options                                                      */
@@ -931,7 +944,7 @@ static void register_cmdline_opts(void)
     nsi_add_command_line_opts(cmdline_options);
 }
 
-NSI_TASK(register_cmdline_opts, PRE_BOOT_1, 200);
+NSI_TASK(register_cmdline_opts, PRE_BOOT_1, REGISTER_CMDLINE_ORDER);
 
 static void boot(void)
 {
@@ -952,7 +965,7 @@ static void boot(void)
     }
 }
 
-NSI_TASK(boot, HW_INIT, 500);
+NSI_TASK(boot, HW_INIT, BOOT_ORDER);
 
 static void cleanup(void)
 {
@@ -963,7 +976,7 @@ static void cleanup(void)
     }
 }
 
-NSI_TASK(cleanup, ON_EXIT_PRE, 100);
+NSI_TASK(cleanup, ON_EXIT_PRE, CLEANUP_ORDER);
 
 /* ------------------------------------------------------------------------- */
 /* Boundary functions called from the embedded side                         */
@@ -998,7 +1011,7 @@ static int send_frame(const uint8_t *psdu, uint16_t len, bool ack)
         return -1;
     }
 
-    uint64_t duration = (uint64_t)(OT_RADIO_SHR_PHR_LENGTH_BYTES + len) * 8U * 1000000U / s_phy_bitrate;
+    uint64_t duration = (uint64_t)(OT_RADIO_SHR_PHR_LENGTH_BYTES + len) * BITS_PER_BYTE * US_PER_SEC / s_phy_bitrate;
 
     struct RadioCommEventData comm = {
         .mChannel = radio_channel, .mPower = radio_power, .mError = OT_ERROR_NONE, .mDuration = duration};
@@ -1057,9 +1070,10 @@ static void interferer_timer_fired(void)
         else
         {
             uint64_t delay = 1;
-            if (tx_interferer_level < 100)
+            if (tx_interferer_level < TX_INTERFERER_LEVEL_MAX)
             {
-                delay = interferer_rand_range(1, 1000000 - (uint64_t)tx_interferer_level * 10000);
+                delay = interferer_rand_range(1, INTERFERER_DELAY_RANGE_US -
+                                                     (uint64_t)tx_interferer_level * INTERFERER_LEVEL_STEP_US);
             }
             set_sub_state(RFSIM_RADIO_SUBSTATE_AWAIT_CCA, delay);
         }
@@ -1265,7 +1279,7 @@ static void radio_timer_fired(void)
     }
 }
 
-NSI_HW_EVENT(radio_event_time, radio_timer_fired, 940);
+NSI_HW_EVENT(radio_event_time, radio_timer_fired, RADIO_TIMER_PRIO);
 
 int nsi_otns_bottom_tx(const uint8_t *psdu, uint16_t len, bool cca)
 {
@@ -1277,7 +1291,7 @@ int nsi_otns_bottom_tx(const uint8_t *psdu, uint16_t len, bool cca)
     {
         return -EBUSY;
     }
-    if (len < 3 || len > OT_RADIO_FRAME_MAX_SIZE)
+    if (len < RADIO_MIN_FRAME_SIZE || len > OT_RADIO_FRAME_MAX_SIZE)
     {
         return -EINVAL;
     }
@@ -1289,7 +1303,7 @@ int nsi_otns_bottom_tx(const uint8_t *psdu, uint16_t len, bool cca)
     }
     memcpy(tx_psdu, psdu, len);
     tx_len       = len;
-    tx_wants_ack = (psdu[0] & 0x20) != 0;
+    tx_wants_ack = (psdu[0] & (FCF_ACK_REQ_BIT & BYTE_MASK)) != 0;
     tx_cca       = cca;
     tx_pending   = true;
     radio_state  = OT_RADIO_STATE_TRANSMIT;
@@ -1352,7 +1366,10 @@ static int request_sample(uint64_t duration, bool scan)
 
 int nsi_otns_bottom_cca(void) { return request_sample(OT_RADIO_CCA_TIME_US, false); }
 
-int nsi_otns_bottom_energy_scan(uint16_t duration_ms) { return request_sample((uint64_t)duration_ms * 1000U, true); }
+int nsi_otns_bottom_energy_scan(uint16_t duration_ms)
+{
+    return request_sample((uint64_t)duration_ms * US_PER_MS, true);
+}
 
 void nsi_otns_bottom_set_channel(uint8_t channel) { current_channel = channel; }
 
@@ -1503,7 +1520,7 @@ void nsi_otns_bottom_pop_host_msg(void)
 {
     if (host_msg_count > 0)
     {
-        host_msg_head = (host_msg_head + 1) % OTNS_HOST_MSG_QUEUE_LEN;
+        host_msg_head = (host_msg_head + 1) % HOST_MSG_QUEUE_LEN;
         host_msg_count--;
     }
 }
