@@ -25,7 +25,8 @@
  * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
  * POSSIBILITY OF SUCH DAMAGE.
  *
- * Embedded (Zephyr CPU) side of the OTNS OpenThread CLI bridge.
+ * OTNS OpenThread CLI bridge: executes the CLI lines OTNS sends as UART events and returns the output as UART events.
+ * Runs on the OpenThread thread (see otns_host_msg_process()), so no thread or queue of its own is needed.
  */
 
 #define LOG_MODULE_NAME otns_cli
@@ -34,43 +35,23 @@ LOG_MODULE_REGISTER(LOG_MODULE_NAME, LOG_LEVEL_INF);
 
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
-#include <zephyr/init.h>
-#include <zephyr/irq.h>
-#include <zephyr/kernel.h>
-
-#include <openthread.h>
 #include <openthread/cli.h>
 #include <openthread/instance.h>
 #include <openthread/link.h>
 
 #include <nsi_main.h>
 
-#include "cli.h"
 #include "ieee802154_priv.h"
 
 #define CLI_LINE_MAX 384
-#define MSGQ_DEPTH 8
-#define MSGQ_ALIGN 4
-#define STACK_SIZE 3072
-#define THREAD_PRIO 8
-#define INIT_PRIORITY 99
 #define OUTPUT_BUF_MAX 512
-#define INPUT_CHUNK_MAX 256
 
-struct line
-{
-    char buf[CLI_LINE_MAX];
-};
-
-K_MSGQ_DEFINE(msgq, sizeof(struct line), MSGQ_DEPTH, MSGQ_ALIGN);
-
-K_THREAD_STACK_DEFINE(stack, STACK_SIZE);
-static struct k_thread thread;
-
-static char acc[CLI_LINE_MAX];
-static int  acc_len;
+static char line[CLI_LINE_MAX];
+static int  line_len;
+static bool cli_initialized;
 
 static int cli_output_cb(void *context, const char *format, va_list arg)
 {
@@ -89,133 +70,75 @@ static int cli_output_cb(void *context, const char *format, va_list arg)
         len = sizeof(buf);
     }
 
-    nsi_otns_cli_output((const uint8_t *)buf, len);
+    nsi_otns_bottom_send_uart((const uint8_t *)buf, len);
     return len;
 }
 
-static void echo_line(const char *text)
-{
-    nsi_otns_cli_output((const uint8_t *)text, strlen(text));
-    nsi_otns_cli_output((const uint8_t *)"\r\n", 2);
-}
-
-static void isr(const void *arg)
-{
-    ARG_UNUSED(arg);
-
-    uint8_t buf[INPUT_CHUNK_MAX];
-    size_t  n;
-
-    while ((n = nsi_otns_cli_get_input(buf, sizeof(buf))) > 0)
-    {
-        for (size_t i = 0; i < n; i++)
-        {
-            char c = (char)buf[i];
-
-            if (c == '\r')
-            {
-                continue;
-            }
-            if (c == '\n')
-            {
-                struct line line;
-
-                if (acc_len == 0)
-                {
-                    continue;
-                }
-                acc[acc_len] = '\0';
-                memcpy(line.buf, acc, acc_len + 1);
-                acc_len = 0;
-                (void)k_msgq_put(&msgq, &line, K_NO_WAIT);
-            }
-            else if (acc_len < CLI_LINE_MAX - 1)
-            {
-                acc[acc_len++] = c;
-            }
-        }
-    }
-}
-
 #ifdef CONFIG_IEEE802154_OTNS_CLI_LEGACY_CSL_PERIOD
-static void translate_legacy_csl_period(struct line *line)
+static void translate_legacy_csl_period(void)
 {
     static const char prefix[] = "csl period ";
     char             *end;
     unsigned long     period;
 
-    if (strncmp(line->buf, prefix, sizeof(prefix) - 1) != 0)
+    if (strncmp(line, prefix, sizeof(prefix) - 1) != 0)
     {
         return;
     }
 
-    period = strtoul(line->buf + sizeof(prefix) - 1, &end, 10);
-    if (end == line->buf + sizeof(prefix) - 1 || *end != '\0')
+    period = strtoul(line + sizeof(prefix) - 1, &end, 10);
+    if (end == line + sizeof(prefix) - 1 || *end != '\0')
     {
         return;
     }
 
-    snprintf(line->buf, sizeof(line->buf), "%s%lu", prefix, period * OT_US_PER_TEN_SYMBOLS);
+    snprintf(line, sizeof(line), "%s%lu", prefix, period * OT_US_PER_TEN_SYMBOLS);
 }
 #endif
 
-static void thread_fn(void *a, void *b, void *c)
+static void run_line(void)
 {
-    otInstance *instance;
+    line[line_len] = '\0';
+    line_len       = 0;
 
-    ARG_UNUSED(a);
-    ARG_UNUSED(b);
-    ARG_UNUSED(c);
-
-    while ((instance = openthread_get_default_instance()) == NULL)
+    if (strcmp(line, "exit") == 0)
     {
-        k_yield();
+        nsi_exit(0);
     }
 
-    openthread_mutex_lock();
-    otCliInit(instance, cli_output_cb, NULL);
-    openthread_mutex_unlock();
-
-    LOG_INF("OTNS OpenThread CLI bridge ready");
-
-    for (;;)
-    {
-        struct line line;
-
-        k_msgq_get(&msgq, &line, K_FOREVER);
-
-        if (strcmp(line.buf, "exit") == 0)
-        {
-            nsi_exit(0);
-        }
-
-        openthread_mutex_lock();
-        echo_line(line.buf);
+    nsi_otns_bottom_send_uart((const uint8_t *)line, strlen(line));
+    nsi_otns_bottom_send_uart((const uint8_t *)"\r\n", 2);
 
 #ifdef CONFIG_IEEE802154_OTNS_CLI_LEGACY_CSL_PERIOD
-        translate_legacy_csl_period(&line);
+    translate_legacy_csl_period();
 #endif
 
-        otCliInputLine(line.buf);
-        openthread_mutex_unlock();
-    }
+    otCliInputLine(line);
 }
 
-static int init(void)
+void otns_cli_input(otInstance *aInstance, const uint8_t *buf, uint16_t len)
 {
-    if (!nsi_otns_cli_is_enabled())
+    if (!cli_initialized)
     {
-        return 0;
+        otCliInit(aInstance, cli_output_cb, NULL);
+        cli_initialized = true;
+        LOG_INF("OTNS OpenThread CLI bridge ready");
     }
 
-    IRQ_CONNECT(IEEE802154_OTNS_CLI_IRQ, 0, isr, NULL, 0);
-    irq_enable(IEEE802154_OTNS_CLI_IRQ);
+    for (uint16_t i = 0; i < len; i++)
+    {
+        char c = (char)buf[i];
 
-    k_thread_create(&thread, stack, K_THREAD_STACK_SIZEOF(stack), thread_fn, NULL, NULL, NULL,
-                    K_PRIO_PREEMPT(THREAD_PRIO), 0, K_NO_WAIT);
-    k_thread_name_set(&thread, "otns_cli");
-
-    return 0;
+        if (c == '\n')
+        {
+            if (line_len > 0)
+            {
+                run_line();
+            }
+        }
+        else if (c != '\r' && line_len < CLI_LINE_MAX - 1)
+        {
+            line[line_len++] = c;
+        }
+    }
 }
-
-SYS_INIT(init, APPLICATION, INIT_PRIORITY);

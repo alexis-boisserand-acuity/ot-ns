@@ -138,10 +138,7 @@ uint32_t __wrap_otPlatAlarmMilliGetNow(void) { return alarm_milli_get_now(); }
 
 uint32_t __wrap_otPlatAlarmMicroGetNow(void) { return alarm_micro_get_now(); }
 
-void __wrap_platformAlarmMilliInit(void)
-{
-    /* IRQs for both alarms are installed once, from __wrap_platformAlarmMicroInit() below. */
-}
+void __wrap_platformAlarmMilliInit(void) {}
 
 void __wrap_platformAlarmMicroInit(void)
 {
@@ -164,9 +161,7 @@ void __wrap_platformAlarmMicroInit(void)
 
 void __wrap_platformAlarmMilliProcess(otInstance *aInstance)
 {
-#if defined(CONFIG_OPENTHREAD_BORDER_ROUTING) && defined(CONFIG_OPENTHREAD_UDP_FORWARD)
-    otns_host_forward_process(aInstance);
-#endif
+    otns_host_msg_process(aInstance);
 
     if (alarm_take_fired(OTNS_ALARM_MILLI))
     {

@@ -211,40 +211,40 @@ static void inject_udp_from_host(otInstance                      *aInstance,
     otUdpForwardReceive(aInstance, udp, aHdr->mSrcPort, (const otIp6Address *)aHdr->mSrcIp6, aHdr->mDstPort);
 }
 
-void otns_host_forward_process(otInstance *aInstance)
+void otns_host_forward_init(otInstance *aInstance)
 {
-    const struct otns_host_msg *msg;
-
-    if (!s_registered)
+    if (s_registered)
     {
-        s_registered = true;
-        otIp6SetReceiveFilterEnabled(aInstance, true);
-        if (!s_ip6_cb_installed)
-        {
-            s_ip6_cb_installed = true;
-            otIp6SetReceiveCallback(aInstance, ip6_receive_trampoline, NULL);
-        }
-        otUdpForwardSetForwarder(aInstance, handle_udp_to_host, aInstance);
+        return;
     }
 
-    while (nsi_otns_bottom_peek_host_msg(&msg))
+    s_registered = true;
+    otIp6SetReceiveFilterEnabled(aInstance, true);
+    if (!s_ip6_cb_installed)
     {
-        if (msg->len >= sizeof(struct MsgToHostEventData))
-        {
-            const struct MsgToHostEventData *hdr        = (const struct MsgToHostEventData *)msg->data;
-            const uint8_t                   *payload    = msg->data + sizeof(*hdr);
-            uint16_t                         payloadLen = msg->len - sizeof(*hdr);
+        s_ip6_cb_installed = true;
+        otIp6SetReceiveCallback(aInstance, ip6_receive_trampoline, NULL);
+    }
+    otUdpForwardSetForwarder(aInstance, handle_udp_to_host, aInstance);
+}
 
-            if (msg->type == OT_SIM_EVENT_IP6_FROM_HOST)
-            {
-                inject_ip6_from_host(aInstance, hdr, payload, payloadLen);
-            }
-            else if (msg->type == OT_SIM_EVENT_UDP_FROM_HOST)
-            {
-                inject_udp_from_host(aInstance, hdr, payload, payloadLen);
-            }
-        }
+void otns_host_forward_msg(otInstance *aInstance, const struct otns_host_msg *msg)
+{
+    if (msg->len < sizeof(struct MsgToHostEventData))
+    {
+        return;
+    }
 
-        nsi_otns_bottom_pop_host_msg();
+    const struct MsgToHostEventData *hdr        = (const struct MsgToHostEventData *)msg->data;
+    const uint8_t                   *payload    = msg->data + sizeof(*hdr);
+    uint16_t                         payloadLen = msg->len - sizeof(*hdr);
+
+    if (msg->type == OT_SIM_EVENT_IP6_FROM_HOST)
+    {
+        inject_ip6_from_host(aInstance, hdr, payload, payloadLen);
+    }
+    else if (msg->type == OT_SIM_EVENT_UDP_FROM_HOST)
+    {
+        inject_udp_from_host(aInstance, hdr, payload, payloadLen);
     }
 }

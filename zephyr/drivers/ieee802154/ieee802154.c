@@ -490,6 +490,13 @@ static uint8_t get_sch_acc(const struct device *dev)
     return nsi_otns_bottom_get_csl_accuracy();
 }
 
+static net_time_t get_time(const struct device *dev)
+{
+    ARG_UNUSED(dev);
+
+    return (net_time_t)nsi_otns_bottom_get_time_us() * NSEC_PER_USEC;
+}
+
 static const struct ieee802154_radio_api radio_api = {
     .iface_api.init = iface_init,
 
@@ -505,6 +512,7 @@ static const struct ieee802154_radio_api radio_api = {
     .attr_get         = attr_get,
     .ed_scan          = energy_scan,
     .get_sch_acc      = get_sch_acc,
+    .get_time         = get_time,
 };
 
 void otPlatOtnsStatus(const char *aStatus)

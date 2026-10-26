@@ -24,31 +24,37 @@
  * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
  * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
  * POSSIBILITY OF SUCH DAMAGE.
+ *
+ * Dispatches the messages the runner side queues for the OpenThread thread: CLI input (UART events) and,
+ * on border routers, IP/UDP datagrams from the host.
  */
 
-#ifndef OTNS_CLI_H__
-#define OTNS_CLI_H__
+#include <zephyr/kernel.h>
 
-#include <stdbool.h>
-#include <stddef.h>
-#include <stdint.h>
+#include <openthread/instance.h>
 
-#ifdef __cplusplus
-extern "C" {
+#include "ieee802154_priv.h"
+
+void otns_host_msg_process(otInstance *aInstance)
+{
+    const struct otns_host_msg *msg;
+
+#if defined(CONFIG_OPENTHREAD_BORDER_ROUTING) && defined(CONFIG_OPENTHREAD_UDP_FORWARD)
+    otns_host_forward_init(aInstance);
 #endif
 
-#define IEEE802154_OTNS_CLI_IRQ 5
-
-bool nsi_otns_cli_is_enabled(void);
-
-void nsi_otns_cli_feed_input(const uint8_t *buf, size_t len);
-
-size_t nsi_otns_cli_get_input(uint8_t *buf, size_t max);
-
-void nsi_otns_cli_output(const uint8_t *buf, size_t len);
-
-#ifdef __cplusplus
+    while (nsi_otns_bottom_peek_host_msg(&msg))
+    {
+        if (msg->type == OT_SIM_EVENT_UART_WRITE)
+        {
+            otns_cli_input(aInstance, msg->data, msg->len);
+        }
+#if defined(CONFIG_OPENTHREAD_BORDER_ROUTING) && defined(CONFIG_OPENTHREAD_UDP_FORWARD)
+        else
+        {
+            otns_host_forward_msg(aInstance, msg);
+        }
+#endif
+        nsi_otns_bottom_pop_host_msg();
+    }
 }
-#endif
-
-#endif /* OTNS_CLI_H__ */

@@ -32,7 +32,7 @@
  * instead of relying on Zephyr's k_timer (whose resolution on native_sim is
  * limited by CONFIG_SYS_CLOCK_TICKS_PER_SEC). Each deadline raises its own
  * dedicated interrupt, pulled by alarm_isr.c on the embedded side - the same
- * pattern used by the radio/CLI IRQs in ieee802154_bottom.c/cli_bottom.c.
+ * pattern used by the radio IRQ in ieee802154_bottom.c.
  */
 
 #include "irq_ctrl.h"

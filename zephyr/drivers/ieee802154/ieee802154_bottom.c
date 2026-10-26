@@ -88,14 +88,13 @@ static bool         have_pending;
 static struct otns_radio_event deliver_ev;
 static bool                    deliver_ready;
 
-#define OTNS_HOST_MSG_QUEUE_LEN 4
+#define OTNS_HOST_MSG_QUEUE_LEN 8
 static struct otns_host_msg host_msgs[OTNS_HOST_MSG_QUEUE_LEN];
 static unsigned             host_msg_head;
 static unsigned             host_msg_count;
 static uint8_t              ack_psdu[OT_RADIO_FRAME_MAX_SIZE];
 static uint16_t             ack_psdu_len;
 
-/* The radio state last reported to OTNS. */
 struct radio_report
 {
     uint8_t       state;
@@ -748,12 +747,6 @@ static void handle_rfsim_param_event(uint8_t event_type, const uint8_t *data, ui
     otSimSendRfSimParamRespEvent(param, value);
 }
 
-__attribute__((weak)) void nsi_otns_cli_feed_input(const uint8_t *buf, size_t len)
-{
-    (void)buf;
-    (void)len;
-}
-
 static void deliver_event(const struct Event *raw)
 {
     if (event_is_for_embedded(raw->mEvent))
@@ -767,7 +760,7 @@ static void deliver_event(const struct Event *raw)
     }
     else if (raw->mEvent == OT_SIM_EVENT_UART_WRITE)
     {
-        nsi_otns_cli_feed_input(raw->mData, raw->mDataLength);
+        queue_host_msg(raw);
     }
     else if (raw->mEvent == OT_SIM_EVENT_RFSIM_PARAM_GET || raw->mEvent == OT_SIM_EVENT_RFSIM_PARAM_SET)
     {
@@ -945,6 +938,12 @@ static void boot(void)
     if (cmd_socket != NULL && cmd_socket[0] != '\0')
     {
         pacer_time = 0;
+
+        /* The CLI output goes to OTNS as UART events, so keep stdout free of anything else. */
+        if (dup2(STDERR_FILENO, STDOUT_FILENO) < 0)
+        {
+            nsi_print_warning("ieee802154_otns: dup2 failed\n");
+        }
     }
     else
     {
@@ -973,8 +972,6 @@ NSI_TASK(cleanup, ON_EXIT_PRE, 100);
 int nsi_otns_bottom_get_node_id(void) { return (int)cmd_node_id; }
 
 bool nsi_otns_bottom_is_connected(void) { return connected; }
-
-bool nsi_otns_bottom_is_configured(void) { return cmd_socket != NULL && cmd_socket[0] != '\0'; }
 
 static void wake_pacer_now(void)
 {
@@ -1087,7 +1084,6 @@ static void interferer_timer_fired(void)
     }
 
     default:
-        /* CCA, frame and turnaround timeouts all restart the interferer cycle. */
         set_sub_state(RFSIM_RADIO_SUBSTATE_READY, 1);
         break;
     }
@@ -1111,7 +1107,6 @@ static void interferer_deliver(const struct otns_radio_event *ev)
     }
     else
     {
-        /* A busy CCA makes the next attempt back off, as Wi-Fi CSMA/CA does. */
         interferer_cca_failed = true;
         set_sub_state(RFSIM_RADIO_SUBSTATE_READY, 1);
     }

@@ -44,6 +44,13 @@ extern "C" {
 
 #define OTNS_RADIO_PREPARE_ACK 0xff
 
+enum otns_alarm
+{
+    OTNS_ALARM_MILLI,
+    OTNS_ALARM_MICRO,
+    OTNS_ALARM_COUNT,
+};
+
 struct otns_radio_event
 {
     uint8_t                   type;
@@ -63,8 +70,6 @@ struct otns_host_msg
 int nsi_otns_bottom_get_node_id(void);
 
 bool nsi_otns_bottom_is_connected(void);
-
-bool nsi_otns_bottom_is_configured(void);
 
 int nsi_otns_bottom_tx(const uint8_t *psdu, uint16_t len, bool cca);
 
@@ -118,20 +123,19 @@ uint8_t nsi_otns_bottom_get_csl_accuracy(void);
 
 uint64_t nsi_otns_bottom_get_time_us(void);
 
-enum otns_alarm
-{
-    OTNS_ALARM_MILLI,
-    OTNS_ALARM_MICRO,
-    OTNS_ALARM_COUNT,
-};
-
 void nsi_otns_bottom_alarm_set_at(enum otns_alarm alarm, uint64_t at_us);
 
 void nsi_otns_bottom_alarm_cancel(enum otns_alarm alarm);
 
 struct otInstance;
 
-void otns_host_forward_process(struct otInstance *aInstance);
+void otns_host_msg_process(struct otInstance *aInstance);
+
+void otns_cli_input(struct otInstance *aInstance, const uint8_t *buf, uint16_t len);
+
+void otns_host_forward_init(struct otInstance *aInstance);
+
+void otns_host_forward_msg(struct otInstance *aInstance, const struct otns_host_msg *msg);
 
 #ifdef __cplusplus
 }
