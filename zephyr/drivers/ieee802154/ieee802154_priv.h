@@ -117,13 +117,11 @@ void nsi_otns_bottom_pop_host_msg(void);
 
 bool nsi_otns_bottom_get_event(struct otns_radio_event *ev);
 
-int32_t nsi_otns_bottom_get_drift_offset_ms(void);
-
 uint8_t nsi_otns_bottom_get_csl_accuracy(void);
 
 uint64_t nsi_otns_bottom_get_time_us(void);
 
-void nsi_otns_bottom_alarm_set_at(enum otns_alarm alarm, uint64_t at_us);
+void nsi_otns_bottom_alarm_set_at(enum otns_alarm alarm, uint64_t delay_us);
 
 void nsi_otns_bottom_alarm_cancel(enum otns_alarm alarm);
 

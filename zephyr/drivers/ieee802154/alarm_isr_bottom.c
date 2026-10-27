@@ -70,11 +70,9 @@ static void alarm_micro_timer_fired(void) { alarm_timer_fired(OTNS_ALARM_MICRO);
 NSI_HW_EVENT(alarm_time_milli_us, alarm_milli_timer_fired, ALARM_MILLI_PRIO);
 NSI_HW_EVENT(alarm_time_micro_us, alarm_micro_timer_fired, ALARM_MICRO_PRIO);
 
-uint64_t nsi_otns_bottom_get_time_us(void) { return nsi_hws_get_time(); }
-
-void nsi_otns_bottom_alarm_set_at(enum otns_alarm alarm, uint64_t at_us)
+void nsi_otns_bottom_alarm_set_at(enum otns_alarm alarm, uint64_t delay_us)
 {
-    *alarm_time_us[alarm] = at_us;
+    *alarm_time_us[alarm] = nsi_hws_get_time() + delay_us;
     nsi_hws_find_next_event();
 }
 

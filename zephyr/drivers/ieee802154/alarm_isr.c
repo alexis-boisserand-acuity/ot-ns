@@ -34,7 +34,8 @@
  * decouples alarm precision from Zephyr's system tick
  * (CONFIG_SYS_CLOCK_TICKS_PER_SEC) since the native simulator's virtual clock
  * (nsi_hws_get_time(), microsecond resolution) is used directly for both
- * "now" and deadline scheduling.
+ * "now" and deadline scheduling. Alarm "now" follows the node clock (simulator time plus
+ * drift, as in the reference), while deadlines are scheduled in simulator time.
  */
 
 #include <zephyr/irq.h>
@@ -74,8 +75,7 @@ static void alarm_isr(const void *arg)
 
 static uint32_t alarm_milli_get_now(void)
 {
-    return (uint32_t)(nsi_otns_bottom_get_time_us() / US_PER_MS) - time_offset_ms -
-           nsi_otns_bottom_get_drift_offset_ms();
+    return (uint32_t)(nsi_otns_bottom_get_time_us() / US_PER_MS) - time_offset_ms;
 }
 
 static uint32_t alarm_micro_get_now(void) { return (uint32_t)nsi_otns_bottom_get_time_us() - time_offset_us; }
@@ -96,7 +96,7 @@ static void alarm_start_at(enum otns_alarm which, uint32_t t0, uint32_t dt)
 
     if (delta > 0)
     {
-        nsi_otns_bottom_alarm_set_at(which, nsi_otns_bottom_get_time_us() + (uint64_t)delta * alarm->us_per_tick);
+        nsi_otns_bottom_alarm_set_at(which, (uint64_t)delta * alarm->us_per_tick);
     }
     else
     {

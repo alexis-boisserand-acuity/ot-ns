@@ -167,10 +167,9 @@ static int16_t  s_clock_drift_ppm = 0;
 static uint8_t  s_csl_accuracy    = RFSIM_CSL_ACCURACY_DEFAULT_PPM;
 static uint8_t  s_csl_uncertainty = RFSIM_CSL_UNCERTAINTY_DEFAULT_10US;
 
-static int64_t  s_drift_ps                = 0;
-static int64_t  s_drift_us_total          = 0;
-static uint64_t s_drift_last_time         = 0;
-static int32_t  s_drift_offset_ms_applied = 0;
+static int64_t  s_drift_ps        = 0;
+static int64_t  s_drift_us_total  = 0;
+static uint64_t s_drift_last_time = 0;
 
 /* ------------------------------------------------------------------------- */
 /* Little-endian (de)serialization helpers                                   */
@@ -218,15 +217,15 @@ static void update_alarm_drift_offset(uint64_t now)
 
         s_drift_ps -= whole_us * DRIFT_ACCUM_PER_US;
         s_drift_us_total += whole_us;
-
-        s_drift_offset_ms_applied = (int32_t)(-(s_drift_us_total / US_PER_MS));
     }
 }
 
-int32_t nsi_otns_bottom_get_drift_offset_ms(void)
+uint64_t nsi_otns_bottom_get_time_us(void)
 {
-    update_alarm_drift_offset(nsi_hws_get_time());
-    return s_drift_offset_ms_applied;
+    uint64_t now = nsi_hws_get_time();
+
+    update_alarm_drift_offset(now);
+    return (uint64_t)((int64_t)now + s_drift_us_total);
 }
 
 uint8_t nsi_otns_bottom_get_csl_accuracy(void) { return s_csl_accuracy; }
@@ -449,7 +448,7 @@ static void handle_comm_start_event(const struct otns_radio_event *ev)
         set_sub_state(radio_sub_state == RFSIM_RADIO_SUBSTATE_TX_AIFS_WAIT ? RFSIM_RADIO_SUBSTATE_TX_ACK_RX_ONGOING
                                                                            : RFSIM_RADIO_SUBSTATE_RX_FRAME_ONGOING,
                       ev->data.mDuration + FAILSAFE_TIME_US);
-        rx_timestamp_us = nsi_hws_get_time() + OT_RADIO_SHR_DURATION_US;
+        rx_timestamp_us = nsi_otns_bottom_get_time_us() + OT_RADIO_SHR_DURATION_US;
     }
 }
 
@@ -823,7 +822,7 @@ static void report_state(void)
     data.mEnergyState   = energy_state;
     data.mSubState      = (uint8_t)radio_sub_state;
     data.mState         = radio_state;
-    data.mRadioTime     = now;
+    data.mRadioTime     = nsi_otns_bottom_get_time_us();
 
     otSimSendRadioStateEvent(&data, delay);
 
